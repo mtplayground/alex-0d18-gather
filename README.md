@@ -13,10 +13,16 @@ activity feeds, email, scheduling, tests, and deployment incrementally.
 
 ## Development
 
+Copy `.env.example` to your local environment manager and replace placeholder
+values with the provisioned secrets. Runtime secrets such as `.env.production`
+must stay out of Git.
+
 Backend:
 
 ```bash
-export DATABASE_URL=$(cat /workspace/.database_url)
+set -a
+source /workspace/.env.production
+set +a
 cargo build
 HOST=0.0.0.0 PORT=8080 cargo run -p gather-api
 ```
@@ -32,6 +38,11 @@ Optional database tuning environment variables:
 - `DATABASE_SSL_MODE` - optional SQLx PostgreSQL SSL mode override. When unset,
   SQLx uses the mode from `DATABASE_URL`. Supported values are `disable`,
   `prefer`, `require`, `verify-ca`, and `verify-full`.
+
+Configuration is centralized in `backend/src/config.rs`. Object storage reads
+the exact `OBJECT_STORAGE_*` names provisioned by myClawTeam, auth reads the
+`MCTAI_AUTH_*` service variables, email reads the optional `MCTAI_EMAIL_*`
+proxy variables, and `JWT_SECRET` is treated as legacy compatibility only.
 
 Frontend:
 

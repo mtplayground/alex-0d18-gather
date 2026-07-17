@@ -25,7 +25,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .context("failed to run database migrations")?;
 
-    let addr = config.socket_addr()?;
+    let addr = config.server.socket_addr()?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind API server on {addr}"))?;
