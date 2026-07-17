@@ -28,12 +28,20 @@ function DashboardPage() {
             <p className="mt-2 text-xs text-slate-500">
               {user?.email_verified ? "Email verified" : "Email verification pending"}
             </p>
-            <a
-              className="mt-3 inline-block text-sm font-semibold text-emerald-700"
-              href="/profile"
-            >
-              Profile settings
-            </a>
+            <div className="mt-4 flex flex-col gap-2">
+              <a
+                className="inline-flex h-10 items-center justify-center rounded-md bg-emerald-700 px-4 text-sm font-semibold text-white transition hover:bg-emerald-800"
+                href="/events/new"
+              >
+                Create event
+              </a>
+              <a
+                className="inline-flex h-10 items-center justify-center rounded-md border border-slate-300 bg-white px-4 text-sm font-semibold text-slate-900 transition hover:border-slate-500 hover:bg-slate-100"
+                href="/profile"
+              >
+                Profile settings
+              </a>
+            </div>
           </div>
         </header>
 
