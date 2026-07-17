@@ -4,6 +4,7 @@ mod db;
 mod email;
 mod events;
 mod models;
+mod reminders;
 mod routes;
 mod state;
 mod storage;
@@ -40,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         .await
         .with_context(|| format!("failed to bind API server on {addr}"))?;
     let state = AppState::new(pool, storage, email, auth_links, auth);
+    reminders::spawn_event_reminder_scheduler(state.clone());
 
     tracing::info!(%addr, "Gather API listening");
 
