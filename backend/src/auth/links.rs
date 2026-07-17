@@ -31,6 +31,10 @@ impl AuthLinkConfig {
         self.auth_url_for_return_path(return_path)
     }
 
+    pub fn google_oauth_url(&self, return_path: Option<&str>) -> anyhow::Result<String> {
+        self.auth_url_for_return_path(return_path)
+    }
+
     fn auth_url_for_return_path(&self, return_path: Option<&str>) -> anyhow::Result<String> {
         let path = normalize_return_path(return_path)?;
         let return_to = format!("{}{}", self.public_base_url, path);
@@ -114,6 +118,18 @@ mod tests {
         assert_eq!(
             url,
             "https://auth.mctai.app/login?app_token=app_test_token&return_to=https%3A%2F%2Fgather.example%2Fprofile"
+        );
+    }
+
+    #[test]
+    fn builds_google_oauth_link_to_frontend_page() {
+        let url = config()
+            .google_oauth_url(Some("/dashboard"))
+            .expect("google oauth link should build");
+
+        assert_eq!(
+            url,
+            "https://auth.mctai.app/login?app_token=app_test_token&return_to=https%3A%2F%2Fgather.example%2Fdashboard"
         );
     }
 

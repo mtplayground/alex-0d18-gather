@@ -1,8 +1,8 @@
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
-    response::{IntoResponse, Response},
-    routing::post,
+    response::{IntoResponse, Redirect, Response},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -21,6 +21,11 @@ struct RegisterRequest {
 #[derive(Debug, Deserialize)]
 struct LoginRequest {
     email: Option<String>,
+    return_to: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct OAuthStartQuery {
     return_to: Option<String>,
 }
 
@@ -47,6 +52,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/register", post(register))
         .route("/login", post(login))
+        .route("/google", get(google_oauth))
 }
 
 async fn register(
@@ -107,6 +113,19 @@ async fn login(
             auth_url,
         }),
     ))
+}
+
+async fn google_oauth(
+    State(state): State<AppState>,
+    Query(query): Query<OAuthStartQuery>,
+) -> Result<Redirect, RegisterError> {
+    let auth_url = state
+        .auth_links
+        .google_oauth_url(query.return_to.as_deref())
+        .map_err(RegisterError::BadRequest)?;
+
+    tracing::info!("google sign-in delegated to myClawTeam auth");
+    Ok(Redirect::temporary(&auth_url))
 }
 
 fn normalize_email(email: &str) -> Result<String, RegisterError> {
