@@ -1,6 +1,7 @@
 mod config;
 mod db;
 mod email;
+mod models;
 mod routes;
 mod state;
 mod storage;
