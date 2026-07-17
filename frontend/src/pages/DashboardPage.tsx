@@ -28,6 +28,12 @@ function DashboardPage() {
             <p className="mt-2 text-xs text-slate-500">
               {user?.email_verified ? "Email verified" : "Email verification pending"}
             </p>
+            <a
+              className="mt-3 inline-block text-sm font-semibold text-emerald-700"
+              href="/profile"
+            >
+              Profile settings
+            </a>
           </div>
         </header>
 
