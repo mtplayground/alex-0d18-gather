@@ -1849,8 +1849,9 @@ impl IntoResponse for EventError {
 mod tests {
     use super::{
         cover_image_extension, escape_html, normalize_comment_body, normalize_email,
-        normalize_rsvp_status, normalize_share_token, parse_required_datetime, rsvp_list_response,
-        rsvp_status_label, validate_pdf_content_type,
+        normalize_event_input, normalize_rsvp_status, normalize_share_token,
+        parse_required_datetime, rsvp_list_response, rsvp_status_label, validate_pdf_content_type,
+        EventMultipartInput,
     };
     use crate::models::invitation::{Invitation, INVITATION_STATUS_ACCEPTED};
     use uuid::Uuid;
@@ -1898,6 +1899,7 @@ mod tests {
             "abc123"
         );
         assert!(normalize_share_token("").is_err());
+        assert!(normalize_share_token(&"x".repeat(129)).is_err());
     }
 
     #[test]
@@ -1918,7 +1920,51 @@ mod tests {
             "See you there."
         );
         assert!(normalize_comment_body("   ").is_err());
+        assert!(normalize_comment_body(&"x".repeat(2000)).is_ok());
         assert!(normalize_comment_body(&"x".repeat(2001)).is_err());
+    }
+
+    #[test]
+    fn normalizes_event_input_and_rejects_bad_times() {
+        let input = EventMultipartInput {
+            title: Some("  Birthday dinner  ".to_owned()),
+            description: Some("  Bring dessert  ".to_owned()),
+            starts_at: Some("2026-08-01T18:00:00Z".to_owned()),
+            ends_at: Some("2026-08-01T20:00:00Z".to_owned()),
+            timezone: Some(" America/New_York ".to_owned()),
+            location_name: Some("  Main Hall  ".to_owned()),
+            location_address: Some("  123 Example St  ".to_owned()),
+            cover_image: None,
+            pdf_attachments: Vec::new(),
+        };
+
+        let normalized = normalize_event_input(input).expect("event should normalize");
+
+        assert_eq!(normalized.title, "Birthday dinner");
+        assert_eq!(normalized.description.as_deref(), Some("Bring dessert"));
+        assert_eq!(
+            normalized.ends_at.expect("ends_at").to_rfc3339(),
+            "2026-08-01T20:00:00+00:00"
+        );
+        assert_eq!(normalized.timezone.as_deref(), Some("America/New_York"));
+        assert_eq!(normalized.location_name.as_deref(), Some("Main Hall"));
+        assert_eq!(
+            normalized.location_address.as_deref(),
+            Some("123 Example St")
+        );
+
+        assert!(normalize_event_input(EventMultipartInput {
+            title: Some("Birthday dinner".to_owned()),
+            description: None,
+            starts_at: Some("2026-08-01T18:00:00Z".to_owned()),
+            ends_at: Some("2026-08-01T18:00:00Z".to_owned()),
+            timezone: None,
+            location_name: None,
+            location_address: None,
+            cover_image: None,
+            pdf_attachments: Vec::new(),
+        })
+        .is_err());
     }
 
     #[test]
@@ -1947,6 +1993,24 @@ mod tests {
             response.maybe[0].invitee_email.as_deref(),
             Some("maybe@example.com")
         );
+    }
+
+    #[test]
+    fn rsvp_list_preserves_user_identity_and_ignores_invalid_entries() {
+        let event_id = Uuid::new_v4();
+        let invitee_user_id = Uuid::new_v4();
+        let mut user_invitation = invitation_with_rsvp(event_id, "user@example.com", Some("yes"));
+        user_invitation.invitee_user_id = Some(invitee_user_id);
+        user_invitation.invitee_email = None;
+        let unknown_status = invitation_with_rsvp(event_id, "unknown@example.com", Some("later"));
+
+        let response = rsvp_list_response(event_id, vec![user_invitation, unknown_status]);
+
+        assert_eq!(response.coming.len(), 1);
+        assert_eq!(response.coming[0].invitee_user_id, Some(invitee_user_id));
+        assert_eq!(response.coming[0].invitee_email, None);
+        assert!(response.declined.is_empty());
+        assert!(response.maybe.is_empty());
     }
 
     fn invitation_with_rsvp(

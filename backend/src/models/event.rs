@@ -59,3 +59,47 @@ impl From<Event> for EventSummary {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{Event, EventSummary};
+    use chrono::{DateTime, Utc};
+    use uuid::Uuid;
+
+    #[test]
+    fn event_summary_keeps_dashboard_fields_only() {
+        let starts_at = DateTime::parse_from_rfc3339("2026-08-01T18:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let created_at = DateTime::parse_from_rfc3339("2026-07-01T12:00:00Z")
+            .expect("timestamp")
+            .with_timezone(&Utc);
+        let event = Event {
+            id: Uuid::new_v4(),
+            organizer_user_id: Uuid::new_v4(),
+            title: "Dinner".to_owned(),
+            description: Some("Details stay off the summary".to_owned()),
+            starts_at,
+            ends_at: None,
+            timezone: Some("UTC".to_owned()),
+            location_name: Some("Main Hall".to_owned()),
+            location_address: Some("123 Example St".to_owned()),
+            cover_image_object_key: Some("events/cover.jpg".to_owned()),
+            pdf_attachment_object_keys: vec!["events/menu.pdf".to_owned()],
+            created_at,
+            updated_at: created_at,
+        };
+
+        let summary = EventSummary::from(event.clone());
+
+        assert_eq!(summary.id, event.id);
+        assert_eq!(summary.organizer_user_id, event.organizer_user_id);
+        assert_eq!(summary.title, "Dinner");
+        assert_eq!(summary.starts_at, starts_at);
+        assert_eq!(summary.location_name.as_deref(), Some("Main Hall"));
+        assert_eq!(
+            summary.cover_image_object_key.as_deref(),
+            Some("events/cover.jpg")
+        );
+    }
+}

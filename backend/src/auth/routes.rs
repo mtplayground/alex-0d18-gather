@@ -637,7 +637,10 @@ impl IntoResponse for ProfileError {
 
 #[cfg(test)]
 mod tests {
-    use super::{image_extension, normalize_email, normalize_website_url};
+    use super::{
+        image_extension, normalize_email, normalize_profile_update, normalize_website_url,
+        ProfilePatchValue, UpdateProfileRequest,
+    };
 
     #[test]
     fn normalizes_valid_email() {
@@ -672,5 +675,65 @@ mod tests {
             }
         );
         assert!(normalize_website_url(Some(Some("javascript:alert(1)".to_owned()))).is_err());
+    }
+
+    #[test]
+    fn normalizes_profile_update_fields() {
+        let update = normalize_profile_update(UpdateProfileRequest {
+            display_name: Some(Some("  Alex  ".to_owned())),
+            full_name: Some(Some("   ".to_owned())),
+            bio: Some(None),
+            location: None,
+            website_url: Some(Some(" https://example.com/alex ".to_owned())),
+        })
+        .expect("profile update should normalize");
+
+        assert_eq!(
+            update.display_name,
+            ProfilePatchValue {
+                provided: true,
+                value: Some("Alex".to_owned())
+            }
+        );
+        assert_eq!(
+            update.full_name,
+            ProfilePatchValue {
+                provided: true,
+                value: None
+            }
+        );
+        assert_eq!(
+            update.bio,
+            ProfilePatchValue {
+                provided: true,
+                value: None
+            }
+        );
+        assert_eq!(
+            update.location,
+            ProfilePatchValue {
+                provided: false,
+                value: None
+            }
+        );
+        assert_eq!(
+            update.website_url,
+            ProfilePatchValue {
+                provided: true,
+                value: Some("https://example.com/alex".to_owned())
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_profile_update_field_over_limits() {
+        assert!(normalize_profile_update(UpdateProfileRequest {
+            display_name: Some(Some("x".repeat(121))),
+            full_name: None,
+            bio: None,
+            location: None,
+            website_url: None,
+        })
+        .is_err());
     }
 }
