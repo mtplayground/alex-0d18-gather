@@ -73,6 +73,30 @@ export type InviteFriendResult = {
   email_sent?: boolean;
 };
 
+export type RsvpStatus = "yes" | "no" | "maybe";
+
+export type RsvpListEntry = {
+  invitation_id: string;
+  invitee_user_id: string | null;
+  invitee_email: string | null;
+  rsvp_status: RsvpStatus;
+  rsvp_responded_at: string;
+};
+
+export type EventRsvpListResult = {
+  event_id: string;
+  coming: RsvpListEntry[];
+  declined: RsvpListEntry[];
+  maybe: RsvpListEntry[];
+};
+
+export type RsvpUpdateResult = {
+  status: string;
+  invitation: InvitationRecord;
+  event: EventRecord;
+  email_sent: boolean;
+};
+
 export type EventCreateInput = {
   title: string;
   description: string;
@@ -163,11 +187,39 @@ export async function fetchDashboardEvents(): Promise<DashboardEventsResult> {
   return payload;
 }
 
+export async function fetchEventRsvps(eventId: string): Promise<EventRsvpListResult> {
+  const response = await fetch(`/api/events/${encodeURIComponent(eventId)}/rsvps`, {
+    credentials: "include",
+  });
+  const payload = (await response.json().catch(() => null)) as
+    (EventRsvpListResult & { message?: string }) | { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "RSVP list could not be loaded."));
+  }
+
+  if (
+    !payload ||
+    !("coming" in payload) ||
+    !("declined" in payload) ||
+    !("maybe" in payload)
+  ) {
+    throw new Error("The RSVP list response was not recognized.");
+  }
+
+  return payload;
+}
+
 export async function inviteFriendByEmail(
   eventId: string,
   email: string,
 ): Promise<InviteFriendResult> {
-  return createInvitation(eventId, email, "invitations", "Invitation could not be sent.");
+  return createInvitation(
+    eventId,
+    email,
+    "invitations",
+    "Invitation could not be sent.",
+  );
 }
 
 export async function createShareableInviteLink(
@@ -197,9 +249,7 @@ async function createInvitation(
     body: JSON.stringify({ email }),
   });
   const payload = (await response.json().catch(() => null)) as
-    | (InviteFriendResult & { message?: string })
-    | { message?: string }
-    | null;
+    (InviteFriendResult & { message?: string }) | { message?: string } | null;
 
   if (!response.ok) {
     throw new Error(readErrorMessage(payload, fallback));
@@ -207,6 +257,35 @@ async function createInvitation(
 
   if (!payload || !("invitation" in payload) || !("invitation_url" in payload)) {
     throw new Error("The invitation response was not recognized.");
+  }
+
+  return payload;
+}
+
+export async function updateInvitationRsvp(
+  shareToken: string,
+  status: RsvpStatus,
+): Promise<RsvpUpdateResult> {
+  const response = await fetch(
+    `/api/invitations/${encodeURIComponent(shareToken)}/rsvp`,
+    {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ status }),
+    },
+  );
+  const payload = (await response.json().catch(() => null)) as
+    (RsvpUpdateResult & { message?: string }) | { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "RSVP could not be updated."));
+  }
+
+  if (!payload || !("invitation" in payload) || !("event" in payload)) {
+    throw new Error("The RSVP response was not recognized.");
   }
 
   return payload;
