@@ -49,6 +49,8 @@ read operations.
 The email proxy client in `backend/src/email.rs` posts to `MCTAI_EMAIL_URL`
 with `MCTAI_EMAIL_APP_TOKEN` as a bearer token and returns a skipped outcome
 when the proxy is not configured.
+User persistence starts with the `users` table migration and typed Rust models
+in `backend/src/models/user.rs`.
 
 Frontend:
 
