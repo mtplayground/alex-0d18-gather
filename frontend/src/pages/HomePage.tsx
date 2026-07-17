@@ -1,6 +1,11 @@
+import { useAuth } from "../auth/useAuth";
 import { googleAuthUrl } from "../lib/authApi";
 
 function HomePage() {
+  const { status, user } = useAuth();
+  const isAuthenticated = status === "authenticated";
+  const name = user?.display_name || user?.full_name || user?.email || "there";
+
   return (
     <main className="min-h-screen bg-slate-50 text-slate-950">
       <section className="mx-auto grid min-h-screen w-full max-w-6xl grid-cols-1 content-center gap-12 px-6 py-10 sm:px-10 lg:grid-cols-[1.1fr_0.9fr] lg:px-14">
@@ -13,26 +18,40 @@ function HomePage() {
             Create an event, share the invitation, and see responses as they happen
             without chasing separate message threads.
           </p>
-          <div className="mt-10 flex flex-col gap-3 sm:flex-row">
-            <a
-              className="inline-flex h-12 items-center justify-center rounded-md bg-emerald-700 px-5 text-base font-semibold text-white transition hover:bg-emerald-800"
-              href="/signup"
-            >
-              Create account
-            </a>
-            <a
-              className="inline-flex h-12 items-center justify-center rounded-md border border-slate-300 bg-white px-5 text-base font-semibold text-slate-900 transition hover:border-slate-500 hover:bg-slate-100"
-              href="/login"
-            >
-              Sign in
-            </a>
-            <a
-              className="inline-flex h-12 items-center justify-center rounded-md border border-slate-300 bg-white px-5 text-base font-semibold text-slate-900 transition hover:border-slate-500 hover:bg-slate-100"
-              href={googleAuthUrl("/")}
-            >
-              Sign in with Google
-            </a>
-          </div>
+          {isAuthenticated ? (
+            <div className="mt-10">
+              <p className="text-base font-semibold text-slate-900">
+                Welcome back, {name}.
+              </p>
+              <a
+                className="mt-4 inline-flex h-12 items-center justify-center rounded-md bg-emerald-700 px-5 text-base font-semibold text-white transition hover:bg-emerald-800"
+                href="/dashboard"
+              >
+                Open dashboard
+              </a>
+            </div>
+          ) : (
+            <div className="mt-10 flex flex-col gap-3 sm:flex-row">
+              <a
+                className="inline-flex h-12 items-center justify-center rounded-md bg-emerald-700 px-5 text-base font-semibold text-white transition hover:bg-emerald-800"
+                href="/signup"
+              >
+                Create account
+              </a>
+              <a
+                className="inline-flex h-12 items-center justify-center rounded-md border border-slate-300 bg-white px-5 text-base font-semibold text-slate-900 transition hover:border-slate-500 hover:bg-slate-100"
+                href="/login"
+              >
+                Sign in
+              </a>
+              <a
+                className="inline-flex h-12 items-center justify-center rounded-md border border-slate-300 bg-white px-5 text-base font-semibold text-slate-900 transition hover:border-slate-500 hover:bg-slate-100"
+                href={googleAuthUrl("/")}
+              >
+                Sign in with Google
+              </a>
+            </div>
+          )}
         </div>
 
         <div className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">

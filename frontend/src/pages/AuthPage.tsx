@@ -1,8 +1,10 @@
-import { FormEvent, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useState } from "react";
 
+import { useAuth } from "../auth/useAuth";
 import {
   AuthStartResponse,
   googleAuthUrl,
+  normalizeReturnTo,
   startLogin,
   startRegistration,
 } from "../lib/authApi";
@@ -38,12 +40,23 @@ const copy = {
 } satisfies Record<AuthMode, Record<string, string>>;
 
 function AuthPage({ mode }: AuthPageProps) {
+  const { status: authStatus } = useAuth();
   const [email, setEmail] = useState("");
   const [status, setStatus] = useState<FormStatus>("idle");
   const [message, setMessage] = useState("");
   const [authUrl, setAuthUrl] = useState("");
   const content = copy[mode];
-  const googleUrl = useMemo(() => googleAuthUrl("/"), []);
+  const returnTo = useMemo(() => {
+    const params = new URLSearchParams(window.location.search);
+    return normalizeReturnTo(params.get("return_to"));
+  }, []);
+  const googleUrl = useMemo(() => googleAuthUrl(returnTo), [returnTo]);
+
+  useEffect(() => {
+    if (authStatus === "authenticated") {
+      window.location.replace(returnTo);
+    }
+  }, [authStatus, returnTo]);
 
   async function submitEmail(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -53,7 +66,9 @@ function AuthPage({ mode }: AuthPageProps) {
 
     try {
       const result =
-        mode === "signup" ? await startRegistration(email) : await startLogin(email);
+        mode === "signup"
+          ? await startRegistration(email, returnTo)
+          : await startLogin(email, returnTo);
       handleAuthResult(result);
     } catch (error) {
       setStatus("error");
