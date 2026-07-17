@@ -46,6 +46,9 @@ proxy variables, and `JWT_SECRET` is treated as legacy compatibility only.
 The object storage client in `backend/src/storage.rs` prepends
 `OBJECT_STORAGE_PREFIX` to every S3 object key before put, delete, or presigned
 read operations.
+The email proxy client in `backend/src/email.rs` posts to `MCTAI_EMAIL_URL`
+with `MCTAI_EMAIL_APP_TOKEN` as a bearer token and returns a skipped outcome
+when the proxy is not configured.
 
 Frontend:
 

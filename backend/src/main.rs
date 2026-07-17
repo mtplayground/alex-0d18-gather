@@ -1,5 +1,6 @@
 mod config;
 mod db;
+mod email;
 mod routes;
 mod state;
 mod storage;
@@ -27,12 +28,13 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to run database migrations")?;
     let storage = storage::ObjectStorage::from_config(&config.object_storage)
         .context("failed to configure object storage client")?;
+    let email = email::EmailClient::from_config(config.email.as_ref());
 
     let addr = config.server.socket_addr()?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind API server on {addr}"))?;
-    let state = AppState::new(pool, storage);
+    let state = AppState::new(pool, storage, email);
 
     tracing::info!(%addr, "Gather API listening");
 
