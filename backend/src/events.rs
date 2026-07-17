@@ -1,9 +1,11 @@
+use std::time::Duration;
+
 use axum::{
-    extract::{DefaultBodyLimit, Extension, Multipart, State},
+    extract::{DefaultBodyLimit, Extension, Multipart, Path, State},
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use bytes::Bytes;
@@ -21,6 +23,8 @@ const MAX_EVENT_BODY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_COVER_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PDF_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_PDF_ATTACHMENTS: usize = 20;
+const EVENT_ASSET_URL_TTL: Duration = Duration::from_secs(60 * 60);
+const DASHBOARD_EVENT_LIMIT: i64 = 100;
 
 #[derive(Debug, Default)]
 struct EventMultipartInput {
@@ -60,6 +64,51 @@ struct CreateEventResponse {
     event: Event,
 }
 
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum EventViewerRole {
+    Host,
+    #[allow(dead_code)]
+    Guest,
+}
+
+#[derive(Debug, Serialize)]
+struct EventAsset {
+    object_key: String,
+    url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct EventDetail {
+    event: Event,
+    viewer_role: EventViewerRole,
+    cover_image: Option<EventAsset>,
+    pdf_attachments: Vec<EventAsset>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventDetailResponse {
+    event: EventDetail,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardEvent {
+    id: Uuid,
+    title: String,
+    starts_at: DateTime<Utc>,
+    ends_at: Option<DateTime<Utc>>,
+    timezone: Option<String>,
+    location_name: Option<String>,
+    cover_image: Option<EventAsset>,
+    viewer_role: EventViewerRole,
+}
+
+#[derive(Debug, Serialize)]
+struct DashboardEventsResponse {
+    upcoming: Vec<DashboardEvent>,
+    past: Vec<DashboardEvent>,
+}
+
 #[derive(Debug, Serialize)]
 struct EventErrorResponse {
     code: &'static str,
@@ -69,6 +118,7 @@ struct EventErrorResponse {
 #[derive(Debug)]
 enum EventError {
     BadRequest(anyhow::Error),
+    NotFound,
     Multipart(axum::extract::multipart::MultipartError),
     Storage(anyhow::Error),
     Database(sqlx::Error),
@@ -76,9 +126,38 @@ enum EventError {
 
 pub fn protected_router(state: AppState) -> Router<AppState> {
     Router::new()
+        .route("/dashboard", get(list_dashboard_events))
+        .route("/:event_id", get(get_event_detail))
         .route("/", post(create_event))
         .layer(DefaultBodyLimit::max(MAX_EVENT_BODY_BYTES))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+async fn get_event_detail(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(event_id): Path<Uuid>,
+) -> Result<Json<EventDetailResponse>, EventError> {
+    let event = fetch_hosted_event(&state, session.user.id, event_id)
+        .await?
+        .ok_or(EventError::NotFound)?;
+    let event = event_detail(&state, event).await?;
+
+    Ok(Json(EventDetailResponse { event }))
+}
+
+async fn list_dashboard_events(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+) -> Result<Json<DashboardEventsResponse>, EventError> {
+    let upcoming =
+        fetch_dashboard_events(&state, session.user.id, DashboardBucket::Upcoming).await?;
+    let past = fetch_dashboard_events(&state, session.user.id, DashboardBucket::Past).await?;
+
+    Ok(Json(DashboardEventsResponse {
+        upcoming: dashboard_events(&state, upcoming).await?,
+        past: dashboard_events(&state, past).await?,
+    }))
 }
 
 async fn create_event(
@@ -220,6 +299,155 @@ async fn insert_event(
     .bind(pdf_attachment_object_keys)
     .fetch_one(&state.db)
     .await
+}
+
+async fn fetch_hosted_event(
+    state: &AppState,
+    user_id: Uuid,
+    event_id: Uuid,
+) -> Result<Option<Event>, EventError> {
+    sqlx::query_as::<_, Event>(
+        r#"
+        SELECT
+            id,
+            organizer_user_id,
+            title,
+            description,
+            starts_at,
+            ends_at,
+            timezone,
+            location_name,
+            location_address,
+            cover_image_object_key,
+            pdf_attachment_object_keys,
+            created_at,
+            updated_at
+        FROM events
+        WHERE id = $1 AND organizer_user_id = $2
+        "#,
+    )
+    .bind(event_id)
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
+#[derive(Debug, Clone, Copy)]
+enum DashboardBucket {
+    Upcoming,
+    Past,
+}
+
+async fn fetch_dashboard_events(
+    state: &AppState,
+    user_id: Uuid,
+    bucket: DashboardBucket,
+) -> Result<Vec<Event>, EventError> {
+    let timing_predicate = match bucket {
+        DashboardBucket::Upcoming => "starts_at >= NOW()",
+        DashboardBucket::Past => "starts_at < NOW()",
+    };
+    let sort_direction = match bucket {
+        DashboardBucket::Upcoming => "ASC",
+        DashboardBucket::Past => "DESC",
+    };
+    let query = format!(
+        r#"
+        SELECT
+            id,
+            organizer_user_id,
+            title,
+            description,
+            starts_at,
+            ends_at,
+            timezone,
+            location_name,
+            location_address,
+            cover_image_object_key,
+            pdf_attachment_object_keys,
+            created_at,
+            updated_at
+        FROM events
+        WHERE organizer_user_id = $1 AND {timing_predicate}
+        ORDER BY starts_at {sort_direction}, created_at DESC
+        LIMIT $2
+        "#
+    );
+
+    sqlx::query_as::<_, Event>(&query)
+        .bind(user_id)
+        .bind(DASHBOARD_EVENT_LIMIT)
+        .fetch_all(&state.db)
+        .await
+        .map_err(EventError::Database)
+}
+
+async fn event_detail(state: &AppState, event: Event) -> Result<EventDetail, EventError> {
+    let cover_image = signed_asset(state, event.cover_image_object_key.as_deref()).await?;
+    let pdf_attachments = signed_assets(state, &event.pdf_attachment_object_keys).await?;
+
+    Ok(EventDetail {
+        event,
+        viewer_role: EventViewerRole::Host,
+        cover_image,
+        pdf_attachments,
+    })
+}
+
+async fn dashboard_events(
+    state: &AppState,
+    events: Vec<Event>,
+) -> Result<Vec<DashboardEvent>, EventError> {
+    let mut dashboard_events = Vec::with_capacity(events.len());
+    for event in events {
+        let cover_image = signed_asset(state, event.cover_image_object_key.as_deref()).await?;
+        dashboard_events.push(DashboardEvent {
+            id: event.id,
+            title: event.title,
+            starts_at: event.starts_at,
+            ends_at: event.ends_at,
+            timezone: event.timezone,
+            location_name: event.location_name,
+            cover_image,
+            viewer_role: EventViewerRole::Host,
+        });
+    }
+
+    Ok(dashboard_events)
+}
+
+async fn signed_assets(
+    state: &AppState,
+    object_keys: &[String],
+) -> Result<Vec<EventAsset>, EventError> {
+    let mut assets = Vec::with_capacity(object_keys.len());
+    for object_key in object_keys {
+        if let Some(asset) = signed_asset(state, Some(object_key)).await? {
+            assets.push(asset);
+        }
+    }
+
+    Ok(assets)
+}
+
+async fn signed_asset(
+    state: &AppState,
+    object_key: Option<&str>,
+) -> Result<Option<EventAsset>, EventError> {
+    let Some(object_key) = object_key else {
+        return Ok(None);
+    };
+    let url = state
+        .storage
+        .presigned_get_url(object_key, EVENT_ASSET_URL_TTL)
+        .await
+        .map_err(EventError::Storage)?;
+
+    Ok(Some(EventAsset {
+        object_key: object_key.to_owned(),
+        url,
+    }))
 }
 
 async fn read_event_multipart(mut multipart: Multipart) -> Result<EventMultipartInput, EventError> {
@@ -437,6 +665,11 @@ impl IntoResponse for EventError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
             Self::BadRequest(error) => (StatusCode::BAD_REQUEST, "bad_request", error.to_string()),
+            Self::NotFound => (
+                StatusCode::NOT_FOUND,
+                "event_not_found",
+                "event was not found".to_owned(),
+            ),
             Self::Multipart(error) => (
                 StatusCode::BAD_REQUEST,
                 "invalid_multipart",
