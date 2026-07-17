@@ -164,6 +164,23 @@ struct RsvpResponse {
     email_sent: bool,
 }
 
+#[derive(Debug, Clone, Serialize)]
+struct RsvpListEntry {
+    invitation_id: Uuid,
+    invitee_user_id: Option<Uuid>,
+    invitee_email: Option<String>,
+    rsvp_status: String,
+    rsvp_responded_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+struct EventRsvpListResponse {
+    event_id: Uuid,
+    coming: Vec<RsvpListEntry>,
+    declined: Vec<RsvpListEntry>,
+    maybe: Vec<RsvpListEntry>,
+}
+
 #[derive(Debug, Serialize)]
 struct EventErrorResponse {
     code: &'static str,
@@ -189,6 +206,7 @@ pub fn protected_router(state: AppState) -> Router<AppState> {
             "/:event_id/invitations/share-link",
             post(create_invitation_share_link),
         )
+        .route("/:event_id/rsvps", get(list_event_rsvps))
         .route("/:event_id", get(get_event_detail))
         .route("/", post(create_event))
         .layer(DefaultBodyLimit::max(MAX_EVENT_BODY_BYTES))
@@ -227,6 +245,19 @@ async fn list_dashboard_events(
         upcoming: dashboard_events(&state, upcoming).await?,
         past: dashboard_events(&state, past).await?,
     }))
+}
+
+async fn list_event_rsvps(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(event_id): Path<Uuid>,
+) -> Result<Json<EventRsvpListResponse>, EventError> {
+    let event = fetch_hosted_event(&state, session.user.id, event_id)
+        .await?
+        .ok_or(EventError::NotFound)?;
+    let invitations = fetch_event_rsvp_invitations(&state, event.id).await?;
+
+    Ok(Json(rsvp_list_response(event.id, invitations)))
 }
 
 async fn create_invitation(
@@ -780,6 +811,45 @@ async fn fetch_event_by_id(state: &AppState, event_id: Uuid) -> Result<Option<Ev
     .map_err(EventError::Database)
 }
 
+async fn fetch_event_rsvp_invitations(
+    state: &AppState,
+    event_id: Uuid,
+) -> Result<Vec<Invitation>, EventError> {
+    sqlx::query_as::<_, Invitation>(
+        r#"
+        SELECT
+            id,
+            event_id,
+            invitee_user_id,
+            invitee_email,
+            status,
+            share_token,
+            rsvp_status,
+            rsvp_responded_at,
+            created_at,
+            updated_at
+        FROM invitations
+        WHERE event_id = $1
+            AND status <> 'revoked'
+            AND rsvp_status IN ('yes', 'no', 'maybe')
+            AND rsvp_responded_at IS NOT NULL
+        ORDER BY
+            CASE rsvp_status
+                WHEN 'yes' THEN 1
+                WHEN 'maybe' THEN 2
+                WHEN 'no' THEN 3
+                ELSE 4
+            END,
+            rsvp_responded_at DESC,
+            created_at DESC
+        "#,
+    )
+    .bind(event_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
 #[derive(Debug, Clone, Copy)]
 enum DashboardBucket {
     Upcoming,
@@ -862,6 +932,48 @@ async fn dashboard_events(
     }
 
     Ok(dashboard_events)
+}
+
+fn rsvp_list_response(event_id: Uuid, invitations: Vec<Invitation>) -> EventRsvpListResponse {
+    let mut response = EventRsvpListResponse {
+        event_id,
+        coming: Vec::new(),
+        declined: Vec::new(),
+        maybe: Vec::new(),
+    };
+
+    for invitation in invitations {
+        let Some(entry) = rsvp_list_entry(&invitation) else {
+            continue;
+        };
+        match entry.rsvp_status.as_str() {
+            RSVP_STATUS_YES => response.coming.push(entry),
+            RSVP_STATUS_NO => response.declined.push(entry),
+            RSVP_STATUS_MAYBE => response.maybe.push(entry),
+            _ => {}
+        }
+    }
+
+    response
+}
+
+fn rsvp_list_entry(invitation: &Invitation) -> Option<RsvpListEntry> {
+    let rsvp_status = invitation.rsvp_status.as_deref()?;
+    let rsvp_responded_at = invitation.rsvp_responded_at?;
+    if !matches!(
+        rsvp_status,
+        RSVP_STATUS_YES | RSVP_STATUS_NO | RSVP_STATUS_MAYBE
+    ) {
+        return None;
+    }
+
+    Some(RsvpListEntry {
+        invitation_id: invitation.id,
+        invitee_user_id: invitation.invitee_user_id,
+        invitee_email: invitation.invitee_email.clone(),
+        rsvp_status: rsvp_status.to_owned(),
+        rsvp_responded_at,
+    })
 }
 
 async fn signed_assets(
@@ -1399,9 +1511,11 @@ impl IntoResponse for EventError {
 mod tests {
     use super::{
         cover_image_extension, escape_html, normalize_email, normalize_rsvp_status,
-        normalize_share_token, parse_required_datetime, rsvp_status_label,
+        normalize_share_token, parse_required_datetime, rsvp_list_response, rsvp_status_label,
         validate_pdf_content_type,
     };
+    use crate::models::invitation::{Invitation, INVITATION_STATUS_ACCEPTED};
+    use uuid::Uuid;
 
     #[test]
     fn validates_event_upload_content_types() {
@@ -1457,5 +1571,55 @@ mod tests {
         );
         assert!(normalize_rsvp_status("soon").is_err());
         assert_eq!(rsvp_status_label("no"), "no");
+    }
+
+    #[test]
+    fn groups_rsvp_list_by_status() {
+        let event_id = Uuid::new_v4();
+        let yes = invitation_with_rsvp(event_id, "yes@example.com", Some("yes"));
+        let no = invitation_with_rsvp(event_id, "no@example.com", Some("no"));
+        let maybe = invitation_with_rsvp(event_id, "maybe@example.com", Some("maybe"));
+        let pending = invitation_with_rsvp(event_id, "pending@example.com", None);
+
+        let response = rsvp_list_response(event_id, vec![yes, no, maybe, pending]);
+
+        assert_eq!(response.event_id, event_id);
+        assert_eq!(response.coming.len(), 1);
+        assert_eq!(
+            response.coming[0].invitee_email.as_deref(),
+            Some("yes@example.com")
+        );
+        assert_eq!(response.declined.len(), 1);
+        assert_eq!(
+            response.declined[0].invitee_email.as_deref(),
+            Some("no@example.com")
+        );
+        assert_eq!(response.maybe.len(), 1);
+        assert_eq!(
+            response.maybe[0].invitee_email.as_deref(),
+            Some("maybe@example.com")
+        );
+    }
+
+    fn invitation_with_rsvp(
+        event_id: Uuid,
+        invitee_email: &str,
+        rsvp_status: Option<&str>,
+    ) -> Invitation {
+        let now = parse_required_datetime(Some("2026-08-01T18:00:00Z".to_owned()), "now")
+            .expect("test timestamp");
+
+        Invitation {
+            id: Uuid::new_v4(),
+            event_id,
+            invitee_user_id: None,
+            invitee_email: Some(invitee_email.to_owned()),
+            status: INVITATION_STATUS_ACCEPTED.to_owned(),
+            share_token: Uuid::new_v4().to_string(),
+            rsvp_status: rsvp_status.map(str::to_owned),
+            rsvp_responded_at: rsvp_status.map(|_| now),
+            created_at: now,
+            updated_at: now,
+        }
     }
 }
