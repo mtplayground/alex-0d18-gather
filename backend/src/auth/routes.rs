@@ -32,6 +32,17 @@ struct OAuthStartQuery {
     return_to: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PasswordResetRequest {
+    email: String,
+    return_to: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PasswordResetConfirmRequest {
+    return_to: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct RegisterResponse {
     status: &'static str,
@@ -41,6 +52,19 @@ struct RegisterResponse {
 
 #[derive(Debug, Serialize)]
 struct LoginResponse {
+    status: &'static str,
+    auth_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct PasswordResetRequestResponse {
+    status: &'static str,
+    auth_url: String,
+    email_sent: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct PasswordResetConfirmResponse {
     status: &'static str,
     auth_url: String,
 }
@@ -56,6 +80,8 @@ pub fn router() -> Router<AppState> {
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/google", get(google_oauth))
+        .route("/password-reset/request", post(request_password_reset))
+        .route("/password-reset/confirm", post(confirm_password_reset))
 }
 
 pub fn protected_router(state: AppState) -> Router<AppState> {
@@ -137,6 +163,61 @@ async fn google_oauth(
     Ok(Redirect::temporary(&auth_url))
 }
 
+async fn request_password_reset(
+    State(state): State<AppState>,
+    Json(payload): Json<PasswordResetRequest>,
+) -> Result<(StatusCode, Json<PasswordResetRequestResponse>), RegisterError> {
+    let email = normalize_email(&payload.email)?;
+    let auth_url = state
+        .auth_links
+        .password_reset_url(payload.return_to.as_deref())
+        .map_err(RegisterError::BadRequest)?;
+
+    let message = password_reset_message(&email, &auth_url);
+    let email_sent = match state.email.send(message).await {
+        Ok(EmailSendOutcome::Sent { message_id }) => {
+            tracing::info!(%message_id, email = %email, "password reset email sent");
+            true
+        }
+        Ok(EmailSendOutcome::Skipped { reason }) => {
+            tracing::warn!(%reason, email = %email, "password reset email skipped");
+            false
+        }
+        Err(error) => return Err(RegisterError::EmailSend(error)),
+    };
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(PasswordResetRequestResponse {
+            status: if email_sent {
+                "password_reset_email_sent"
+            } else {
+                "password_reset_started"
+            },
+            auth_url,
+            email_sent,
+        }),
+    ))
+}
+
+async fn confirm_password_reset(
+    State(state): State<AppState>,
+    Json(payload): Json<PasswordResetConfirmRequest>,
+) -> Result<(StatusCode, Json<PasswordResetConfirmResponse>), RegisterError> {
+    let auth_url = state
+        .auth_links
+        .password_reset_url(payload.return_to.as_deref())
+        .map_err(RegisterError::BadRequest)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(PasswordResetConfirmResponse {
+            status: "password_reset_managed_by_auth_service",
+            auth_url,
+        }),
+    ))
+}
+
 async fn current_user(Extension(session): Extension<AuthenticatedSession>) -> Json<UserProfile> {
     Json(session.user.into())
 }
@@ -183,6 +264,28 @@ fn verification_message(email: &str, auth_url: &str) -> EmailMessage {
     EmailMessage {
         to: vec![email.to_owned()],
         subject: "Complete your Gather registration".to_owned(),
+        html: Some(html),
+        text: Some(text),
+        reply_to: None,
+    }
+}
+
+fn password_reset_message(email: &str, auth_url: &str) -> EmailMessage {
+    let html = format!(
+        r#"
+        <p>We received a request to restore access to your Gather account.</p>
+        <p>Use this secure myClawTeam auth link to continue:</p>
+        <p><a href="{auth_url}">Continue account recovery</a></p>
+        <p>If you did not request this, you can ignore this email.</p>
+        "#
+    );
+    let text = format!(
+        "We received a request to restore access to your Gather account.\n\nUse this secure myClawTeam auth link to continue:\n{auth_url}\n\nIf you did not request this, you can ignore this email."
+    );
+
+    EmailMessage {
+        to: vec![email.to_owned()],
+        subject: "Restore access to your Gather account".to_owned(),
         html: Some(html),
         text: Some(text),
         reply_to: None,
