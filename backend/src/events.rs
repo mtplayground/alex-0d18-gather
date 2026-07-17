@@ -216,12 +216,6 @@ struct EventTimelineResponse {
     activity: Vec<EventActivityEntry>,
 }
 
-#[derive(Debug, Serialize)]
-struct EventErrorResponse {
-    code: &'static str,
-    message: String,
-}
-
 #[derive(Debug)]
 enum EventError {
     BadRequest(anyhow::Error),
@@ -1483,19 +1477,24 @@ async fn fetch_user_email(state: &AppState, user_id: Uuid) -> Result<Option<Stri
 
 fn normalize_email(value: &str) -> Result<String, EventError> {
     let email = value.trim().to_ascii_lowercase();
-    if email.is_empty() {
+    if email.is_empty()
+        || email.len() > 320
+        || email.chars().any(char::is_whitespace)
+        || !email.contains('@')
+    {
         return Err(EventError::BadRequest(anyhow::anyhow!(
-            "invitee email is required"
+            "invitee email must be a valid address"
         )));
     }
-    if email.len() > 320 {
+
+    let Some((local, domain)) = email.split_once('@') else {
         return Err(EventError::BadRequest(anyhow::anyhow!(
-            "invitee email must be 320 characters or fewer"
+            "invitee email must be a valid address"
         )));
-    }
-    if !email.contains('@') {
+    };
+    if local.is_empty() || domain.is_empty() || !domain.contains('.') {
         return Err(EventError::BadRequest(anyhow::anyhow!(
-            "invitee email must include @"
+            "invitee email must be a valid address"
         )));
     }
 
@@ -1510,6 +1509,14 @@ fn normalize_share_token(value: &str) -> Result<String, EventError> {
         )));
     }
     if token.len() > 128 {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitation token is invalid"
+        )));
+    }
+    if !token
+        .chars()
+        .all(|char| char.is_ascii_alphanumeric() || matches!(char, '-' | '_'))
+    {
         return Err(EventError::BadRequest(anyhow::anyhow!(
             "invitation token is invalid"
         )));
@@ -1841,7 +1848,7 @@ impl IntoResponse for EventError {
             }
         };
 
-        (status, Json(EventErrorResponse { code, message })).into_response()
+        crate::error::json_error(status, code, message).into_response()
     }
 }
 
@@ -1882,6 +1889,8 @@ mod tests {
             "friend@example.com"
         );
         assert!(normalize_email("missing-at").is_err());
+        assert!(normalize_email("friend @example.com").is_err());
+        assert!(normalize_email("friend@example").is_err());
     }
 
     #[test]
@@ -1900,6 +1909,8 @@ mod tests {
         );
         assert!(normalize_share_token("").is_err());
         assert!(normalize_share_token(&"x".repeat(129)).is_err());
+        assert!(normalize_share_token("../secret").is_err());
+        assert!(normalize_share_token("token with spaces").is_err());
     }
 
     #[test]

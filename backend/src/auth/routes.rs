@@ -99,12 +99,6 @@ struct PhotoUploadResponse {
     profile: ProfileResponse,
 }
 
-#[derive(Debug, Serialize)]
-struct ErrorResponse {
-    code: &'static str,
-    message: String,
-}
-
 const MAX_PROFILE_PHOTO_BYTES: usize = 5 * 1024 * 1024;
 const AVATAR_SIGNED_URL_TTL: Duration = Duration::from_secs(60 * 60);
 
@@ -600,7 +594,7 @@ impl IntoResponse for RegisterError {
             }
         };
 
-        (status, Json(ErrorResponse { code, message })).into_response()
+        crate::error::json_error(status, code, message).into_response()
     }
 }
 
@@ -631,7 +625,7 @@ impl IntoResponse for ProfileError {
             }
         };
 
-        (status, Json(ErrorResponse { code, message })).into_response()
+        crate::error::json_error(status, code, message).into_response()
     }
 }
 
