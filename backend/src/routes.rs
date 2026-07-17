@@ -14,6 +14,7 @@ struct HealthResponse {
 pub fn app(state: AppState) -> Router {
     let protected_auth_routes = crate::auth::routes::protected_router(state.clone());
     let protected_event_routes = crate::events::protected_router(state.clone());
+    let protected_invitation_routes = crate::events::invitation_router(state.clone());
 
     Router::new()
         .route("/", get(root))
@@ -21,6 +22,7 @@ pub fn app(state: AppState) -> Router {
         .nest("/api/auth", crate::auth::routes::router())
         .nest("/api/auth", protected_auth_routes)
         .nest("/api/events", protected_event_routes)
+        .nest("/api/invitations", protected_invitation_routes)
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any))
 }
