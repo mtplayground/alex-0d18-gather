@@ -1,0 +1,2 @@
+-- Initial migration placeholder.
+-- Future issues add schema changes here through new timestamped migrations.

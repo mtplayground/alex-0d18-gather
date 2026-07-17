@@ -1,8 +1,11 @@
 mod config;
+mod db;
 mod routes;
+mod state;
 
 use anyhow::Context;
 use config::Config;
+use state::AppState;
 use tokio::net::TcpListener;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
@@ -15,16 +18,26 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env().context("failed to load server configuration")?;
+    let pool = db::connect(&config.database)
+        .await
+        .context("failed to connect to PostgreSQL")?;
+    db::run_migrations(&pool)
+        .await
+        .context("failed to run database migrations")?;
+
     let addr = config.socket_addr()?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind API server on {addr}"))?;
+    let state = AppState::new(pool);
 
     tracing::info!(%addr, "Gather API listening");
 
     axum::serve(
         listener,
-        routes::app().layer(TraceLayer::new_for_http()).into_make_service(),
+        routes::app(state)
+            .layer(TraceLayer::new_for_http())
+            .into_make_service(),
     )
     .with_graceful_shutdown(shutdown_signal())
     .await
@@ -56,4 +69,3 @@ async fn shutdown_signal() {
         _ = terminate => {},
     }
 }
-
