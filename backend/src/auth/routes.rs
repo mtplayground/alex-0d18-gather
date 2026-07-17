@@ -1,6 +1,7 @@
 use axum::{
-    extract::{Query, State},
+    extract::{Extension, Query, State},
     http::StatusCode,
+    middleware,
     response::{IntoResponse, Redirect, Response},
     routing::{get, post},
     Json, Router,
@@ -8,7 +9,9 @@ use axum::{
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    auth::{middleware::require_auth, session::AuthenticatedSession},
     email::{EmailMessage, EmailSendOutcome},
+    models::user::UserProfile,
     state::AppState,
 };
 
@@ -53,6 +56,12 @@ pub fn router() -> Router<AppState> {
         .route("/register", post(register))
         .route("/login", post(login))
         .route("/google", get(google_oauth))
+}
+
+pub fn protected_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/me", get(current_user))
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
 async fn register(
@@ -126,6 +135,10 @@ async fn google_oauth(
 
     tracing::info!("google sign-in delegated to myClawTeam auth");
     Ok(Redirect::temporary(&auth_url))
+}
+
+async fn current_user(Extension(session): Extension<AuthenticatedSession>) -> Json<UserProfile> {
+    Json(session.user.into())
 }
 
 fn normalize_email(email: &str) -> Result<String, RegisterError> {
