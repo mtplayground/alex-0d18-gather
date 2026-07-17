@@ -108,6 +108,21 @@ export type CreateCommentResult = {
   comment: EventComment;
 };
 
+export type EventActivityEntry = {
+  id: string;
+  event_id: string;
+  actor_user_id: string | null;
+  activity_type: string;
+  subject_type: string | null;
+  subject_id: string | null;
+  message: string;
+  created_at: string;
+};
+
+export type EventTimelineResult = {
+  activity: EventActivityEntry[];
+};
+
 export type RsvpUpdateResult = {
   status: string;
   invitation: InvitationRecord;
@@ -289,6 +304,24 @@ export async function deleteEventComment(
   if (!response.ok) {
     throw new Error(readErrorMessage(payload, "Comment could not be deleted."));
   }
+}
+
+export async function fetchEventTimeline(eventId: string): Promise<EventTimelineResult> {
+  const response = await fetch(`/api/events/${encodeURIComponent(eventId)}/timeline`, {
+    credentials: "include",
+  });
+  const payload = (await response.json().catch(() => null)) as
+    (EventTimelineResult & { message?: string }) | { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "Timeline could not be loaded."));
+  }
+
+  if (!payload || !("activity" in payload)) {
+    throw new Error("The timeline response was not recognized.");
+  }
+
+  return payload;
 }
 
 export async function inviteFriendByEmail(

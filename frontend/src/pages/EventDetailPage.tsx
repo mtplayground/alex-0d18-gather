@@ -5,10 +5,12 @@ import {
   createEventComment,
   createShareableInviteLink,
   deleteEventComment,
+  EventActivityEntry,
   EventComment,
   EventRsvpListResult,
   EventDetail,
   fetchEventComments,
+  fetchEventTimeline,
   fetchEventRsvps,
   fetchEventDetail,
   inviteFriendByEmail,
@@ -248,6 +250,8 @@ function LoadedEventDetail({ detail }: { detail: EventDetail }) {
             <InviteFriendsPanel eventId={event.id} />
 
             <RsvpListPanel eventId={event.id} />
+
+            <ActivityTimelinePanel eventId={event.id} userId={user?.id ?? null} />
           </aside>
         </div>
       </section>
@@ -441,6 +445,106 @@ function CommentThread({
               </li>
             );
           })}
+        </ol>
+      ) : null}
+    </section>
+  );
+}
+
+function ActivityTimelinePanel({
+  eventId,
+  userId,
+}: {
+  eventId: string;
+  userId: string | null;
+}) {
+  const [activity, setActivity] = useState<EventActivityEntry[]>([]);
+  const [status, setStatus] = useState<LoadState>("loading");
+  const [message, setMessage] = useState("");
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadTimeline() {
+      setStatus("loading");
+      setMessage("");
+
+      try {
+        const result = await fetchEventTimeline(eventId);
+        if (!active) {
+          return;
+        }
+        setActivity(result.activity);
+        setStatus("loaded");
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        setActivity([]);
+        setStatus("error");
+        setMessage(
+          error instanceof Error ? error.message : "Timeline could not be loaded.",
+        );
+      }
+    }
+
+    void loadTimeline();
+
+    return () => {
+      active = false;
+    };
+  }, [eventId]);
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between gap-4">
+        <h2 className="text-base font-semibold text-slate-950">Activity</h2>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+          {activity.length}
+        </span>
+      </div>
+
+      {status === "loading" ? (
+        <p className="mt-4 text-sm leading-6 text-slate-600">Loading activity.</p>
+      ) : null}
+
+      {status === "error" ? (
+        <p className="mt-4 text-sm leading-6 text-rose-700" role="alert">
+          {message}
+        </p>
+      ) : null}
+
+      {status === "loaded" && activity.length === 0 ? (
+        <div className="mt-4 rounded-md border border-dashed border-slate-300 bg-slate-50 p-4">
+          <p className="text-sm font-semibold text-slate-900">No activity yet.</p>
+          <p className="mt-1 text-sm leading-6 text-slate-600">
+            Event changes, RSVPs, and comments will appear here.
+          </p>
+        </div>
+      ) : null}
+
+      {status === "loaded" && activity.length > 0 ? (
+        <ol className="mt-4 space-y-4">
+          {activity.map((entry) => (
+            <li className="relative pl-8" key={entry.id}>
+              <span
+                className={`absolute left-0 top-1 h-3 w-3 rounded-full ${activityToneClass(
+                  entry.activity_type,
+                )}`}
+              />
+              <div>
+                <p className="text-sm font-semibold text-slate-950">
+                  {activityTitle(entry)}
+                </p>
+                <p className="mt-1 text-sm leading-6 text-slate-700">
+                  {entry.message}
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  {activityActor(entry, userId)} · {formatDateTime(entry.created_at)}
+                </p>
+              </div>
+            </li>
+          ))}
         </ol>
       ) : null}
     </section>
@@ -723,6 +827,48 @@ function fileNameFromKey(key: string): string {
 
 function rsvpEntryName(entry: RsvpListEntry): string {
   return entry.invitee_email || entry.invitee_user_id || "Guest";
+}
+
+function activityTitle(entry: EventActivityEntry): string {
+  switch (entry.activity_type) {
+    case "event_created":
+      return "Event created";
+    case "rsvp_updated":
+      return "RSVP updated";
+    case "comment_created":
+      return "Comment added";
+    default:
+      return readableActivityType(entry.activity_type);
+  }
+}
+
+function activityActor(entry: EventActivityEntry, userId: string | null): string {
+  if (!entry.actor_user_id) {
+    return "System";
+  }
+
+  return entry.actor_user_id === userId ? "You" : "Event member";
+}
+
+function activityToneClass(activityType: string): string {
+  switch (activityType) {
+    case "event_created":
+      return "bg-emerald-500";
+    case "rsvp_updated":
+      return "bg-amber-500";
+    case "comment_created":
+      return "bg-sky-500";
+    default:
+      return "bg-slate-400";
+  }
+}
+
+function readableActivityType(activityType: string): string {
+  return activityType
+    .split("_")
+    .filter(Boolean)
+    .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+    .join(" ");
 }
 
 export default EventDetailPage;
