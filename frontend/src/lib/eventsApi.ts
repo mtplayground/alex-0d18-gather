@@ -19,6 +19,24 @@ export type CreateEventResult = {
   event: EventRecord;
 };
 
+export type EventAsset = {
+  object_key: string;
+  url: string;
+};
+
+export type EventViewerRole = "host" | "guest";
+
+export type EventDetail = {
+  event: EventRecord;
+  viewer_role: EventViewerRole;
+  cover_image: EventAsset | null;
+  pdf_attachments: EventAsset[];
+};
+
+export type EventDetailResult = {
+  event: EventDetail;
+};
+
 export type EventCreateInput = {
   title: string;
   description: string;
@@ -68,6 +86,24 @@ export async function createEvent(input: EventCreateInput): Promise<CreateEventR
 
   if (!payload || !("event" in payload)) {
     throw new Error("The event creation response was not recognized.");
+  }
+
+  return payload;
+}
+
+export async function fetchEventDetail(eventId: string): Promise<EventDetailResult> {
+  const response = await fetch(`/api/events/${encodeURIComponent(eventId)}`, {
+    credentials: "include",
+  });
+  const payload = (await response.json().catch(() => null)) as
+    (EventDetailResult & { message?: string }) | { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "Event could not be loaded."));
+  }
+
+  if (!payload || !("event" in payload)) {
+    throw new Error("The event detail response was not recognized.");
   }
 
   return payload;
