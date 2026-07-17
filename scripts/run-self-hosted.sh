@@ -46,5 +46,14 @@ fi
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-8080}"
 
+if [[ -z "${FRONTEND_DIST_DIR:-}" && -f "${APP_DIR}/frontend/index.html" ]]; then
+  export FRONTEND_DIST_DIR="${APP_DIR}/frontend"
+fi
+
+if [[ -n "${FRONTEND_DIST_DIR:-}" && ! -f "${FRONTEND_DIST_DIR}/index.html" ]]; then
+  echo "FRONTEND_DIST_DIR must contain index.html: ${FRONTEND_DIST_DIR}" >&2
+  exit 1
+fi
+
 echo "Starting Gather API on ${HOST}:${PORT}"
 exec "${BIN_PATH}"

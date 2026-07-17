@@ -83,6 +83,7 @@ mod tests {
                 port: 8080,
                 self_url: Some("https://gather.example".to_owned()),
                 allowed_cors_origin: None,
+                frontend_dist_dir: None,
             },
             &AuthConfig {
                 url: "https://auth.mctai.app/".to_owned(),

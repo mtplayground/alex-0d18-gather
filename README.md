@@ -95,4 +95,6 @@ dist/self-hosted/run.sh
 `scripts/build-self-hosted.sh` builds the Vite frontend and release Rust API,
 then writes a package to `dist/self-hosted/`. `run.sh` loads
 `.env.production` from that package when present, defaults to
-`HOST=0.0.0.0` and `PORT=8080`, and starts `bin/gather-api`.
+`HOST=0.0.0.0`, `PORT=8080`, and `FRONTEND_DIST_DIR=./frontend`, then starts
+`bin/gather-api`. With `FRONTEND_DIST_DIR` set, the API serves the built React
+app for non-API routes and keeps `/api/*` reserved for backend endpoints.
