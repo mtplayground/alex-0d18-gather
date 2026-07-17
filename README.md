@@ -54,6 +54,10 @@ in `backend/src/models/user.rs`.
 Password hashing uses Argon2 in `backend/src/auth/password.rs`. Session setup
 uses verified myClawTeam `mctai_session` claims to upsert users without issuing
 an additional app JWT.
+Registration starts at `POST /api/auth/register` with an email address and
+optional frontend `return_to` path. The endpoint sends a myClawTeam auth link
+through the central email proxy when configured, and never returns or creates an
+app-issued JWT.
 
 Frontend:
 
