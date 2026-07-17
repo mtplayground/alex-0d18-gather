@@ -57,3 +57,19 @@ cd frontend
 npm install
 npm run dev
 ```
+
+## Self-Hosted Directory Deployment
+
+This repository includes bare file/directory deployment scripts. They do not
+use Docker or a CI/CD pipeline.
+
+```bash
+scripts/build-self-hosted.sh
+cp /workspace/.env.production dist/self-hosted/.env.production
+dist/self-hosted/run.sh
+```
+
+`scripts/build-self-hosted.sh` builds the Vite frontend and release Rust API,
+then writes a package to `dist/self-hosted/`. `run.sh` loads
+`.env.production` from that package when present, defaults to
+`HOST=0.0.0.0` and `PORT=8080`, and starts `bin/gather-api`.
