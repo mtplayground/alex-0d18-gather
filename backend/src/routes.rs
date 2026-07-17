@@ -15,6 +15,7 @@ pub fn app(state: AppState) -> Router {
     Router::new()
         .route("/", get(root))
         .route("/api/health", get(health))
+        .nest("/api/auth", crate::auth::routes::router())
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any))
 }

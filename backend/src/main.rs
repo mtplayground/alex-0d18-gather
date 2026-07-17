@@ -31,12 +31,13 @@ async fn main() -> anyhow::Result<()> {
     let storage = storage::ObjectStorage::from_config(&config.object_storage)
         .context("failed to configure object storage client")?;
     let email = email::EmailClient::from_config(config.email.as_ref());
+    let auth_links = auth::links::AuthLinkConfig::from_config(&config.server, &config.auth);
 
     let addr = config.server.socket_addr()?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind API server on {addr}"))?;
-    let state = AppState::new(pool, storage, email);
+    let state = AppState::new(pool, storage, email, auth_links);
 
     tracing::info!(%addr, "Gather API listening");
 
