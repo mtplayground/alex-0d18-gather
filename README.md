@@ -68,6 +68,10 @@ existing user upsert helper.
 Authenticated API routes use `backend/src/auth/middleware.rs` to validate the
 `mctai_session` cookie against the myClawTeam JWKS endpoint, then upsert the
 local user record. `GET /api/auth/me` is the initial protected route.
+Password reset starts at `POST /api/auth/password-reset/request`, which emails a
+central myClawTeam auth recovery link. `POST /api/auth/password-reset/confirm`
+returns the same central-auth handoff because this app does not own password
+credentials.
 
 Frontend:
 
