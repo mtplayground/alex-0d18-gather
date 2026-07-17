@@ -17,6 +17,10 @@ use crate::{
     auth::{middleware::require_auth, session::AuthenticatedSession},
     email::{EmailMessage, EmailSendOutcome},
     models::{
+        activity::{
+            EventActivityEntry, ACTIVITY_COMMENT_CREATED, ACTIVITY_EVENT_CREATED,
+            ACTIVITY_RSVP_UPDATED,
+        },
         comment::EventComment,
         event::Event,
         invitation::{
@@ -205,6 +209,11 @@ struct DeleteCommentResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct EventTimelineResponse {
+    activity: Vec<EventActivityEntry>,
+}
+
+#[derive(Debug, Serialize)]
 struct EventErrorResponse {
     code: &'static str,
     message: String,
@@ -234,6 +243,7 @@ pub fn protected_router(state: AppState) -> Router<AppState> {
             get(list_comments).post(create_comment),
         )
         .route("/:event_id/comments/:comment_id", delete(delete_comment))
+        .route("/:event_id/timeline", get(list_event_timeline))
         .route("/:event_id/rsvps", get(list_event_rsvps))
         .route("/:event_id", get(get_event_detail))
         .route("/", post(create_event))
@@ -322,6 +332,16 @@ async fn create_comment(
     .ok_or(EventError::NotFound)?;
     let body = normalize_comment_body(&payload.body)?;
     let comment = insert_event_comment(&state, event.id, session.user.id, body).await?;
+    insert_event_activity(
+        &state,
+        event.id,
+        Some(session.user.id),
+        ACTIVITY_COMMENT_CREATED,
+        Some("comment"),
+        Some(comment.id),
+        "Comment added",
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -345,6 +365,24 @@ async fn delete_comment(
     Ok(Json(DeleteCommentResponse {
         status: "comment_deleted",
     }))
+}
+
+async fn list_event_timeline(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(event_id): Path<Uuid>,
+) -> Result<Json<EventTimelineResponse>, EventError> {
+    fetch_commentable_event(
+        &state,
+        session.user.id,
+        session.user.email.as_str(),
+        event_id,
+    )
+    .await?
+    .ok_or(EventError::NotFound)?;
+    let activity = fetch_event_activity(&state, event_id).await?;
+
+    Ok(Json(EventTimelineResponse { activity }))
 }
 
 async fn create_invitation(
@@ -515,6 +553,16 @@ async fn update_rsvp(
     let event = fetch_event_by_id(&state, invitation.event_id)
         .await?
         .ok_or(EventError::NotFound)?;
+    insert_event_activity(
+        &state,
+        event.id,
+        Some(session.user.id),
+        ACTIVITY_RSVP_UPDATED,
+        Some("invitation"),
+        Some(invitation.id),
+        format!("RSVP updated to {}", rsvp_status_label(&rsvp_status)),
+    )
+    .await?;
     let email_sent =
         send_rsvp_confirmation(&state, &event, &invitation, session.user.email.as_str()).await;
 
@@ -596,6 +644,16 @@ async fn create_event(
             return Err(EventError::Database(error));
         }
     };
+    insert_event_activity(
+        &state,
+        event.id,
+        Some(session.user.id),
+        ACTIVITY_EVENT_CREATED,
+        Some("event"),
+        Some(event.id),
+        "Event created",
+    )
+    .await?;
 
     Ok((
         StatusCode::CREATED,
@@ -1027,6 +1085,74 @@ async fn delete_event_comment(
     .map_err(EventError::Database)?;
 
     Ok(result.rows_affected() > 0)
+}
+
+async fn fetch_event_activity(
+    state: &AppState,
+    event_id: Uuid,
+) -> Result<Vec<EventActivityEntry>, EventError> {
+    sqlx::query_as::<_, EventActivityEntry>(
+        r#"
+        SELECT
+            id,
+            event_id,
+            actor_user_id,
+            activity_type,
+            subject_type,
+            subject_id,
+            message,
+            created_at
+        FROM event_activity_entries
+        WHERE event_id = $1
+        ORDER BY created_at DESC, id DESC
+        "#,
+    )
+    .bind(event_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
+async fn insert_event_activity(
+    state: &AppState,
+    event_id: Uuid,
+    actor_user_id: Option<Uuid>,
+    activity_type: &str,
+    subject_type: Option<&str>,
+    subject_id: Option<Uuid>,
+    message: impl Into<String>,
+) -> Result<EventActivityEntry, EventError> {
+    sqlx::query_as::<_, EventActivityEntry>(
+        r#"
+        INSERT INTO event_activity_entries (
+            event_id,
+            actor_user_id,
+            activity_type,
+            subject_type,
+            subject_id,
+            message
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING
+            id,
+            event_id,
+            actor_user_id,
+            activity_type,
+            subject_type,
+            subject_id,
+            message,
+            created_at
+        "#,
+    )
+    .bind(event_id)
+    .bind(actor_user_id)
+    .bind(activity_type)
+    .bind(subject_type)
+    .bind(subject_id)
+    .bind(message.into())
+    .fetch_one(&state.db)
+    .await
+    .map_err(EventError::Database)
 }
 
 async fn fetch_event_rsvp_invitations(
