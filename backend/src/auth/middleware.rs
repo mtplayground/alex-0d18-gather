@@ -5,10 +5,9 @@ use axum::{
     http::{header, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
-    Json,
 };
 use jsonwebtoken::{decode, decode_header, Algorithm, DecodingKey, Validation};
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use tokio::sync::RwLock;
 use tokio::time::Instant;
 
@@ -61,12 +60,6 @@ struct MctaiJwtClaims {
     email_verified: bool,
     name: Option<String>,
     picture: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct AuthErrorResponse {
-    code: &'static str,
-    message: &'static str,
 }
 
 #[derive(Debug)]
@@ -190,35 +183,29 @@ pub fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<&str> {
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         match self {
-            Self::MissingSession => (
+            Self::MissingSession => crate::error::json_error(
                 StatusCode::UNAUTHORIZED,
-                Json(AuthErrorResponse {
-                    code: "unauthorized",
-                    message: "authentication required",
-                }),
+                "unauthorized",
+                "authentication required",
             )
-                .into_response(),
+            .into_response(),
             Self::InvalidSession(error) => {
                 tracing::warn!(%error, "session validation failed");
-                (
+                crate::error::json_error(
                     StatusCode::UNAUTHORIZED,
-                    Json(AuthErrorResponse {
-                        code: "invalid_session",
-                        message: "session is invalid or expired",
-                    }),
+                    "invalid_session",
+                    "session is invalid or expired",
                 )
-                    .into_response()
+                .into_response()
             }
             Self::UserUpsert(error) => {
                 tracing::error!(%error, "failed to upsert authenticated user");
-                (
+                crate::error::json_error(
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(AuthErrorResponse {
-                        code: "auth_user_sync_failed",
-                        message: "authenticated user could not be synchronized",
-                    }),
+                    "auth_user_sync_failed",
+                    "authenticated user could not be synchronized",
                 )
-                    .into_response()
+                .into_response()
             }
         }
     }
