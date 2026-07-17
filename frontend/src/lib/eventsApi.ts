@@ -53,6 +53,26 @@ export type DashboardEventsResult = {
   past: DashboardEvent[];
 };
 
+export type InvitationRecord = {
+  id: string;
+  event_id: string;
+  invitee_user_id: string | null;
+  invitee_email: string | null;
+  status: string;
+  share_token: string;
+  rsvp_status: string | null;
+  rsvp_responded_at: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type InviteFriendResult = {
+  status: string;
+  invitation: InvitationRecord;
+  invitation_url: string;
+  email_sent?: boolean;
+};
+
 export type EventCreateInput = {
   title: string;
   description: string;
@@ -138,6 +158,55 @@ export async function fetchDashboardEvents(): Promise<DashboardEventsResult> {
 
   if (!payload || !("upcoming" in payload) || !("past" in payload)) {
     throw new Error("The dashboard events response was not recognized.");
+  }
+
+  return payload;
+}
+
+export async function inviteFriendByEmail(
+  eventId: string,
+  email: string,
+): Promise<InviteFriendResult> {
+  return createInvitation(eventId, email, "invitations", "Invitation could not be sent.");
+}
+
+export async function createShareableInviteLink(
+  eventId: string,
+  email: string,
+): Promise<InviteFriendResult> {
+  return createInvitation(
+    eventId,
+    email,
+    "invitations/share-link",
+    "Invitation link could not be created.",
+  );
+}
+
+async function createInvitation(
+  eventId: string,
+  email: string,
+  path: "invitations" | "invitations/share-link",
+  fallback: string,
+): Promise<InviteFriendResult> {
+  const response = await fetch(`/api/events/${encodeURIComponent(eventId)}/${path}`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ email }),
+  });
+  const payload = (await response.json().catch(() => null)) as
+    | (InviteFriendResult & { message?: string })
+    | { message?: string }
+    | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, fallback));
+  }
+
+  if (!payload || !("invitation" in payload) || !("invitation_url" in payload)) {
+    throw new Error("The invitation response was not recognized.");
   }
 
   return payload;
