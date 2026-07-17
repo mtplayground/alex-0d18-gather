@@ -18,11 +18,23 @@ struct RegisterRequest {
     return_to: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    email: Option<String>,
+    return_to: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct RegisterResponse {
     status: &'static str,
     auth_url: String,
     email_sent: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct LoginResponse {
+    status: &'static str,
+    auth_url: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -32,7 +44,9 @@ struct ErrorResponse {
 }
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/register", post(register))
+    Router::new()
+        .route("/register", post(register))
+        .route("/login", post(login))
 }
 
 async fn register(
@@ -68,6 +82,29 @@ async fn register(
             },
             auth_url,
             email_sent,
+        }),
+    ))
+}
+
+async fn login(
+    State(state): State<AppState>,
+    Json(payload): Json<LoginRequest>,
+) -> Result<(StatusCode, Json<LoginResponse>), RegisterError> {
+    if let Some(email) = payload.email.as_deref() {
+        let email = normalize_email(email)?;
+        tracing::info!(email = %email, "login started through myClawTeam auth");
+    }
+
+    let auth_url = state
+        .auth_links
+        .login_url(payload.return_to.as_deref())
+        .map_err(RegisterError::BadRequest)?;
+
+    Ok((
+        StatusCode::OK,
+        Json(LoginResponse {
+            status: "login_started",
+            auth_url,
         }),
     ))
 }
