@@ -90,6 +90,24 @@ export type EventRsvpListResult = {
   maybe: RsvpListEntry[];
 };
 
+export type EventComment = {
+  id: string;
+  event_id: string;
+  author_user_id: string;
+  body: string;
+  created_at: string;
+  updated_at: string;
+};
+
+export type EventCommentsResult = {
+  comments: EventComment[];
+};
+
+export type CreateCommentResult = {
+  status: string;
+  comment: EventComment;
+};
+
 export type RsvpUpdateResult = {
   status: string;
   invitation: InvitationRecord;
@@ -208,6 +226,69 @@ export async function fetchEventRsvps(eventId: string): Promise<EventRsvpListRes
   }
 
   return payload;
+}
+
+export async function fetchEventComments(eventId: string): Promise<EventCommentsResult> {
+  const response = await fetch(`/api/events/${encodeURIComponent(eventId)}/comments`, {
+    credentials: "include",
+  });
+  const payload = (await response.json().catch(() => null)) as
+    (EventCommentsResult & { message?: string }) | { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "Comments could not be loaded."));
+  }
+
+  if (!payload || !("comments" in payload)) {
+    throw new Error("The comments response was not recognized.");
+  }
+
+  return payload;
+}
+
+export async function createEventComment(
+  eventId: string,
+  body: string,
+): Promise<CreateCommentResult> {
+  const response = await fetch(`/api/events/${encodeURIComponent(eventId)}/comments`, {
+    method: "POST",
+    credentials: "include",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ body }),
+  });
+  const payload = (await response.json().catch(() => null)) as
+    (CreateCommentResult & { message?: string }) | { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "Comment could not be posted."));
+  }
+
+  if (!payload || !("comment" in payload)) {
+    throw new Error("The comment response was not recognized.");
+  }
+
+  return payload;
+}
+
+export async function deleteEventComment(
+  eventId: string,
+  commentId: string,
+): Promise<void> {
+  const response = await fetch(
+    `/api/events/${encodeURIComponent(eventId)}/comments/${encodeURIComponent(commentId)}`,
+    {
+      method: "DELETE",
+      credentials: "include",
+    },
+  );
+  const payload = (await response.json().catch(() => null)) as
+    { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "Comment could not be deleted."));
+  }
 }
 
 export async function inviteFriendByEmail(
