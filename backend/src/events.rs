@@ -10,12 +10,16 @@ use axum::{
 };
 use bytes::Bytes;
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
     auth::{middleware::require_auth, session::AuthenticatedSession},
-    models::event::Event,
+    email::{EmailMessage, EmailSendOutcome},
+    models::{
+        event::Event,
+        invitation::{Invitation, INVITATION_STATUS_PENDING},
+    },
     state::AppState,
 };
 
@@ -109,6 +113,27 @@ struct DashboardEventsResponse {
     past: Vec<DashboardEvent>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateInvitationRequest {
+    email: Option<String>,
+    invitee_email: Option<String>,
+    invitee_user_id: Option<Uuid>,
+}
+
+#[derive(Debug)]
+struct NormalizedInvitationInput {
+    invitee_email: String,
+    invitee_user_id: Option<Uuid>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateInvitationResponse {
+    status: &'static str,
+    invitation: Invitation,
+    invitation_url: String,
+    email_sent: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct EventErrorResponse {
     code: &'static str,
@@ -121,12 +146,14 @@ enum EventError {
     NotFound,
     Multipart(axum::extract::multipart::MultipartError),
     Storage(anyhow::Error),
+    Email(anyhow::Error),
     Database(sqlx::Error),
 }
 
 pub fn protected_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/dashboard", get(list_dashboard_events))
+        .route("/:event_id/invitations", post(create_invitation))
         .route("/:event_id", get(get_event_detail))
         .route("/", post(create_event))
         .layer(DefaultBodyLimit::max(MAX_EVENT_BODY_BYTES))
@@ -158,6 +185,73 @@ async fn list_dashboard_events(
         upcoming: dashboard_events(&state, upcoming).await?,
         past: dashboard_events(&state, past).await?,
     }))
+}
+
+async fn create_invitation(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(event_id): Path<Uuid>,
+    Json(payload): Json<CreateInvitationRequest>,
+) -> Result<(StatusCode, Json<CreateInvitationResponse>), EventError> {
+    let event = fetch_hosted_event(&state, session.user.id, event_id)
+        .await?
+        .ok_or(EventError::NotFound)?;
+    let input = normalize_invitation_input(&state, payload).await?;
+    let invitation = insert_invitation(
+        &state,
+        event.id,
+        input.invitee_user_id,
+        input.invitee_email.clone(),
+    )
+    .await
+    .map_err(invitation_insert_error)?;
+    let invitation_path = format!("/invitations/{}", invitation.share_token);
+    let invitation_url = state
+        .auth_links
+        .login_url(Some(&invitation_path))
+        .map_err(EventError::BadRequest)?;
+
+    let message = invitation_message(&event, &input.invitee_email, &invitation_url);
+    let email_sent = match state.email.send(message).await {
+        Ok(EmailSendOutcome::Sent { message_id }) => {
+            tracing::info!(
+                %message_id,
+                event_id = %event.id,
+                invitation_id = %invitation.id,
+                invitee_email = %input.invitee_email,
+                "event invitation email sent"
+            );
+            true
+        }
+        Ok(EmailSendOutcome::Skipped { reason }) => {
+            tracing::warn!(
+                %reason,
+                event_id = %event.id,
+                invitation_id = %invitation.id,
+                invitee_email = %input.invitee_email,
+                "event invitation email skipped"
+            );
+            false
+        }
+        Err(error) => {
+            cleanup_invitation_after_email_failure(&state, invitation.id).await;
+            return Err(EventError::Email(error));
+        }
+    };
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateInvitationResponse {
+            status: if email_sent {
+                "invitation_email_sent"
+            } else {
+                "invitation_created"
+            },
+            invitation,
+            invitation_url,
+            email_sent,
+        }),
+    ))
 }
 
 async fn create_event(
@@ -299,6 +393,59 @@ async fn insert_event(
     .bind(pdf_attachment_object_keys)
     .fetch_one(&state.db)
     .await
+}
+
+async fn insert_invitation(
+    state: &AppState,
+    event_id: Uuid,
+    invitee_user_id: Option<Uuid>,
+    invitee_email: String,
+) -> Result<Invitation, sqlx::Error> {
+    sqlx::query_as::<_, Invitation>(
+        r#"
+        INSERT INTO invitations (
+            event_id,
+            invitee_user_id,
+            invitee_email,
+            status
+        )
+        VALUES ($1, $2, $3, $4)
+        RETURNING
+            id,
+            event_id,
+            invitee_user_id,
+            invitee_email,
+            status,
+            share_token,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(event_id)
+    .bind(invitee_user_id)
+    .bind(invitee_email)
+    .bind(INVITATION_STATUS_PENDING)
+    .fetch_one(&state.db)
+    .await
+}
+
+async fn cleanup_invitation_after_email_failure(state: &AppState, invitation_id: Uuid) {
+    if let Err(error) = sqlx::query(
+        r#"
+        DELETE FROM invitations
+        WHERE id = $1
+        "#,
+    )
+    .bind(invitation_id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::warn!(
+            %error,
+            %invitation_id,
+            "failed to clean up invitation after email send failure"
+        );
+    }
 }
 
 async fn fetch_hosted_event(
@@ -524,6 +671,127 @@ async fn read_upload_part(
     })
 }
 
+async fn normalize_invitation_input(
+    state: &AppState,
+    payload: CreateInvitationRequest,
+) -> Result<NormalizedInvitationInput, EventError> {
+    let invitee_user_id = payload.invitee_user_id;
+    let requested_email = payload
+        .email
+        .or(payload.invitee_email)
+        .map(|value| normalize_email(&value))
+        .transpose()?;
+    let invitee_email = match (requested_email, invitee_user_id) {
+        (Some(email), _) => email,
+        (None, Some(user_id)) => fetch_user_email(state, user_id)
+            .await?
+            .ok_or_else(|| EventError::BadRequest(anyhow::anyhow!("invitee user was not found")))?,
+        (None, None) => {
+            return Err(EventError::BadRequest(anyhow::anyhow!(
+                "invitee email or user id is required"
+            )));
+        }
+    };
+
+    Ok(NormalizedInvitationInput {
+        invitee_email,
+        invitee_user_id,
+    })
+}
+
+async fn fetch_user_email(state: &AppState, user_id: Uuid) -> Result<Option<String>, EventError> {
+    sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT email
+        FROM users
+        WHERE id = $1
+        "#,
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(EventError::Database)
+    .and_then(|email| email.map(|email| normalize_email(&email)).transpose())
+}
+
+fn normalize_email(value: &str) -> Result<String, EventError> {
+    let email = value.trim().to_ascii_lowercase();
+    if email.is_empty() {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitee email is required"
+        )));
+    }
+    if email.len() > 320 {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitee email must be 320 characters or fewer"
+        )));
+    }
+    if !email.contains('@') {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitee email must include @"
+        )));
+    }
+
+    Ok(email)
+}
+
+fn invitation_insert_error(error: sqlx::Error) -> EventError {
+    if database_error_code_is(&error, "23505") {
+        return EventError::BadRequest(anyhow::anyhow!(
+            "an invitation already exists for this event and invitee"
+        ));
+    }
+    if database_error_code_is(&error, "23503") {
+        return EventError::BadRequest(anyhow::anyhow!("invitee user was not found"));
+    }
+
+    EventError::Database(error)
+}
+
+fn database_error_code_is(error: &sqlx::Error, code: &str) -> bool {
+    error
+        .as_database_error()
+        .and_then(|database_error| database_error.code())
+        .is_some_and(|database_code| database_code == code)
+}
+
+fn invitation_message(event: &Event, invitee_email: &str, invitation_url: &str) -> EmailMessage {
+    let title = escape_html(&event.title);
+    let escaped_url = escape_html(invitation_url);
+    let escaped_email = escape_html(invitee_email);
+    let starts_at = event.starts_at.to_rfc3339();
+    let location = event
+        .location_name
+        .as_deref()
+        .unwrap_or("Location to be announced");
+    let escaped_location = escape_html(location);
+
+    EmailMessage {
+        to: vec![invitee_email.to_owned()],
+        subject: format!("Invitation: {}", event.title),
+        html: Some(format!(
+            r#"<p>Hello {escaped_email},</p>
+<p>You have been invited to <strong>{title}</strong>.</p>
+<p><strong>When:</strong> {starts_at}<br><strong>Where:</strong> {escaped_location}</p>
+<p><a href="{escaped_url}">View your invitation</a></p>"#
+        )),
+        text: Some(format!(
+            "You have been invited to {}.\n\nWhen: {}\nWhere: {}\n\nView your invitation: {}",
+            event.title, starts_at, location, invitation_url
+        )),
+        reply_to: None,
+    }
+}
+
+fn escape_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
+}
+
 fn normalize_event_input(input: EventMultipartInput) -> Result<NormalizedEventInput, EventError> {
     let title = normalize_required_text(input.title, "title", 200)?;
     let description = normalize_optional_text(input.description, "description", 5000)?;
@@ -683,12 +951,20 @@ impl IntoResponse for EventError {
                     "event files could not be stored; try again shortly".to_owned(),
                 )
             }
+            Self::Email(error) => {
+                tracing::error!(%error, "event invitation email send failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "event_invitation_email_unavailable",
+                    "invitation email could not be sent; try again shortly".to_owned(),
+                )
+            }
             Self::Database(error) => {
                 tracing::error!(%error, "event database operation failed");
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    "event_create_failed",
-                    "event could not be created".to_owned(),
+                    "event_operation_failed",
+                    "event operation could not be completed".to_owned(),
                 )
             }
         };
@@ -699,7 +975,10 @@ impl IntoResponse for EventError {
 
 #[cfg(test)]
 mod tests {
-    use super::{cover_image_extension, parse_required_datetime, validate_pdf_content_type};
+    use super::{
+        cover_image_extension, escape_html, normalize_email, parse_required_datetime,
+        validate_pdf_content_type,
+    };
 
     #[test]
     fn validates_event_upload_content_types() {
@@ -718,5 +997,22 @@ mod tests {
             .expect("valid timestamp");
         assert_eq!(parsed.to_rfc3339(), "2026-08-01T18:00:00+00:00");
         assert!(parse_required_datetime(Some("tomorrow".to_owned()), "starts_at").is_err());
+    }
+
+    #[test]
+    fn normalizes_invitation_email() {
+        assert_eq!(
+            normalize_email("  Friend@Example.COM ").expect("email accepted"),
+            "friend@example.com"
+        );
+        assert!(normalize_email("missing-at").is_err());
+    }
+
+    #[test]
+    fn escapes_invitation_email_html() {
+        assert_eq!(
+            escape_html("<Gather & friends>"),
+            "&lt;Gather &amp; friends&gt;"
+        );
     }
 }
