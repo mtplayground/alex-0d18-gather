@@ -8,6 +8,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::EmailConfig;
 
+pub mod templates;
+
 #[derive(Clone)]
 pub struct EmailClient {
     inner: Option<ConfiguredEmailClient>,

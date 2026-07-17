@@ -15,7 +15,10 @@ use uuid::Uuid;
 
 use crate::{
     auth::{middleware::require_auth, session::AuthenticatedSession},
-    email::{EmailMessage, EmailSendOutcome},
+    email::{
+        templates::{self, EventInvitationTemplate, RsvpConfirmationTemplate},
+        EmailMessage, EmailSendOutcome,
+    },
     models::{
         activity::{
             EventActivityEntry, ACTIVITY_COMMENT_CREATED, ACTIVITY_EVENT_CREATED,
@@ -1562,31 +1565,19 @@ fn database_error_code_is(error: &sqlx::Error, code: &str) -> bool {
 }
 
 fn invitation_message(event: &Event, invitee_email: &str, invitation_url: &str) -> EmailMessage {
-    let title = escape_html(&event.title);
-    let escaped_url = escape_html(invitation_url);
-    let escaped_email = escape_html(invitee_email);
     let starts_at = event.starts_at.to_rfc3339();
     let location = event
         .location_name
         .as_deref()
         .unwrap_or("Location to be announced");
-    let escaped_location = escape_html(location);
 
-    EmailMessage {
-        to: vec![invitee_email.to_owned()],
-        subject: format!("Invitation: {}", event.title),
-        html: Some(format!(
-            r#"<p>Hello {escaped_email},</p>
-<p>You have been invited to <strong>{title}</strong>.</p>
-<p><strong>When:</strong> {starts_at}<br><strong>Where:</strong> {escaped_location}</p>
-<p><a href="{escaped_url}">View your invitation</a></p>"#
-        )),
-        text: Some(format!(
-            "You have been invited to {}.\n\nWhen: {}\nWhere: {}\n\nView your invitation: {}",
-            event.title, starts_at, location, invitation_url
-        )),
-        reply_to: None,
-    }
+    templates::event_invitation(EventInvitationTemplate {
+        invitee_email,
+        event_title: &event.title,
+        starts_at: &starts_at,
+        location,
+        invitation_url,
+    })
 }
 
 async fn send_rsvp_confirmation(
@@ -1638,33 +1629,19 @@ async fn send_rsvp_confirmation(
 }
 
 fn rsvp_confirmation_message(event: &Event, recipient: &str, rsvp_status: &str) -> EmailMessage {
-    let title = escape_html(&event.title);
-    let escaped_recipient = escape_html(recipient);
-    let escaped_status = escape_html(rsvp_status_label(rsvp_status));
     let starts_at = event.starts_at.to_rfc3339();
     let location = event
         .location_name
         .as_deref()
         .unwrap_or("Location to be announced");
-    let escaped_location = escape_html(location);
 
-    EmailMessage {
-        to: vec![recipient.to_owned()],
-        subject: format!("RSVP confirmed: {}", event.title),
-        html: Some(format!(
-            r#"<p>Hello {escaped_recipient},</p>
-<p>Your RSVP for <strong>{title}</strong> is confirmed as <strong>{escaped_status}</strong>.</p>
-<p><strong>When:</strong> {starts_at}<br><strong>Where:</strong> {escaped_location}</p>"#
-        )),
-        text: Some(format!(
-            "Your RSVP for {} is confirmed as {}.\n\nWhen: {}\nWhere: {}",
-            event.title,
-            rsvp_status_label(rsvp_status),
-            starts_at,
-            location
-        )),
-        reply_to: None,
-    }
+    templates::rsvp_confirmation(RsvpConfirmationTemplate {
+        recipient_email: recipient,
+        event_title: &event.title,
+        rsvp_status_label: rsvp_status_label(rsvp_status),
+        starts_at: &starts_at,
+        location,
+    })
 }
 
 fn rsvp_status_label(status: &str) -> &'static str {
@@ -1676,6 +1653,7 @@ fn rsvp_status_label(status: &str) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn escape_html(value: &str) -> String {
     value
         .replace('&', "&amp;")
