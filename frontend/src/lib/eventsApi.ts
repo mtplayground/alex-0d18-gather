@@ -37,6 +37,22 @@ export type EventDetailResult = {
   event: EventDetail;
 };
 
+export type DashboardEvent = {
+  id: string;
+  title: string;
+  starts_at: string;
+  ends_at: string | null;
+  timezone: string | null;
+  location_name: string | null;
+  cover_image: EventAsset | null;
+  viewer_role: EventViewerRole;
+};
+
+export type DashboardEventsResult = {
+  upcoming: DashboardEvent[];
+  past: DashboardEvent[];
+};
+
 export type EventCreateInput = {
   title: string;
   description: string;
@@ -104,6 +120,24 @@ export async function fetchEventDetail(eventId: string): Promise<EventDetailResu
 
   if (!payload || !("event" in payload)) {
     throw new Error("The event detail response was not recognized.");
+  }
+
+  return payload;
+}
+
+export async function fetchDashboardEvents(): Promise<DashboardEventsResult> {
+  const response = await fetch("/api/events/dashboard", {
+    credentials: "include",
+  });
+  const payload = (await response.json().catch(() => null)) as
+    (DashboardEventsResult & { message?: string }) | { message?: string } | null;
+
+  if (!response.ok) {
+    throw new Error(readErrorMessage(payload, "Dashboard events could not be loaded."));
+  }
+
+  if (!payload || !("upcoming" in payload) || !("past" in payload)) {
+    throw new Error("The dashboard events response was not recognized.");
   }
 
   return payload;
