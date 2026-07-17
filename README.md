@@ -61,6 +61,10 @@ app-issued JWT.
 Login starts at `POST /api/auth/login` and returns a myClawTeam auth URL. The
 platform sets the persistent `mctai_session` cookie after the browser completes
 that flow.
+Google sign-in starts at `GET /api/auth/google`, which redirects to the same
+central myClawTeam auth service instead of handling Google client secrets in
+this app. Verified `mctai_session` claims are linked to local users through the
+existing user upsert helper.
 
 Frontend:
 
