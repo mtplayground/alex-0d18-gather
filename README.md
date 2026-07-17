@@ -43,6 +43,9 @@ Configuration is centralized in `backend/src/config.rs`. Object storage reads
 the exact `OBJECT_STORAGE_*` names provisioned by myClawTeam, auth reads the
 `MCTAI_AUTH_*` service variables, email reads the optional `MCTAI_EMAIL_*`
 proxy variables, and `JWT_SECRET` is treated as legacy compatibility only.
+The object storage client in `backend/src/storage.rs` prepends
+`OBJECT_STORAGE_PREFIX` to every S3 object key before put, delete, or presigned
+read operations.
 
 Frontend:
 

@@ -118,6 +118,11 @@ impl ObjectStorageConfig {
         if prefix.is_empty() {
             return Err(anyhow::anyhow!("OBJECT_STORAGE_PREFIX must not be empty"));
         }
+        if !prefix.ends_with('/') {
+            return Err(anyhow::anyhow!(
+                "OBJECT_STORAGE_PREFIX must end with a trailing slash"
+            ));
+        }
 
         Ok(Self {
             access_key_id: required_env("OBJECT_STORAGE_ACCESS_KEY_ID")?,
