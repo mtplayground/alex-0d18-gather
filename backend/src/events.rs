@@ -5,7 +5,7 @@ use axum::{
     http::StatusCode,
     middleware,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
     Json, Router,
 };
 use bytes::Bytes;
@@ -17,6 +17,7 @@ use crate::{
     auth::{middleware::require_auth, session::AuthenticatedSession},
     email::{EmailMessage, EmailSendOutcome},
     models::{
+        comment::EventComment,
         event::Event,
         invitation::{
             Invitation, INVITATION_STATUS_ACCEPTED, INVITATION_STATUS_DECLINED,
@@ -30,6 +31,7 @@ const MAX_EVENT_BODY_BYTES: usize = 128 * 1024 * 1024;
 const MAX_COVER_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PDF_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
 const MAX_PDF_ATTACHMENTS: usize = 20;
+const MAX_COMMENT_BODY_CHARS: usize = 2000;
 const EVENT_ASSET_URL_TTL: Duration = Duration::from_secs(60 * 60);
 const DASHBOARD_EVENT_LIMIT: i64 = 100;
 
@@ -181,6 +183,27 @@ struct EventRsvpListResponse {
     maybe: Vec<RsvpListEntry>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CreateCommentRequest {
+    body: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CommentListResponse {
+    comments: Vec<EventComment>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateCommentResponse {
+    status: &'static str,
+    comment: EventComment,
+}
+
+#[derive(Debug, Serialize)]
+struct DeleteCommentResponse {
+    status: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 struct EventErrorResponse {
     code: &'static str,
@@ -206,6 +229,11 @@ pub fn protected_router(state: AppState) -> Router<AppState> {
             "/:event_id/invitations/share-link",
             post(create_invitation_share_link),
         )
+        .route(
+            "/:event_id/comments",
+            get(list_comments).post(create_comment),
+        )
+        .route("/:event_id/comments/:comment_id", delete(delete_comment))
         .route("/:event_id/rsvps", get(list_event_rsvps))
         .route("/:event_id", get(get_event_detail))
         .route("/", post(create_event))
@@ -258,6 +286,65 @@ async fn list_event_rsvps(
     let invitations = fetch_event_rsvp_invitations(&state, event.id).await?;
 
     Ok(Json(rsvp_list_response(event.id, invitations)))
+}
+
+async fn list_comments(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(event_id): Path<Uuid>,
+) -> Result<Json<CommentListResponse>, EventError> {
+    fetch_commentable_event(
+        &state,
+        session.user.id,
+        session.user.email.as_str(),
+        event_id,
+    )
+    .await?
+    .ok_or(EventError::NotFound)?;
+    let comments = fetch_event_comments(&state, event_id).await?;
+
+    Ok(Json(CommentListResponse { comments }))
+}
+
+async fn create_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(event_id): Path<Uuid>,
+    Json(payload): Json<CreateCommentRequest>,
+) -> Result<(StatusCode, Json<CreateCommentResponse>), EventError> {
+    let event = fetch_commentable_event(
+        &state,
+        session.user.id,
+        session.user.email.as_str(),
+        event_id,
+    )
+    .await?
+    .ok_or(EventError::NotFound)?;
+    let body = normalize_comment_body(&payload.body)?;
+    let comment = insert_event_comment(&state, event.id, session.user.id, body).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateCommentResponse {
+            status: "comment_created",
+            comment,
+        }),
+    ))
+}
+
+async fn delete_comment(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path((event_id, comment_id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<DeleteCommentResponse>, EventError> {
+    let deleted = delete_event_comment(&state, event_id, comment_id, session.user.id).await?;
+    if !deleted {
+        return Err(EventError::NotFound);
+    }
+
+    Ok(Json(DeleteCommentResponse {
+        status: "comment_deleted",
+    }))
 }
 
 async fn create_invitation(
@@ -811,6 +898,137 @@ async fn fetch_event_by_id(state: &AppState, event_id: Uuid) -> Result<Option<Ev
     .map_err(EventError::Database)
 }
 
+async fn fetch_commentable_event(
+    state: &AppState,
+    user_id: Uuid,
+    user_email: &str,
+    event_id: Uuid,
+) -> Result<Option<Event>, EventError> {
+    sqlx::query_as::<_, Event>(
+        r#"
+        SELECT
+            e.id,
+            e.organizer_user_id,
+            e.title,
+            e.description,
+            e.starts_at,
+            e.ends_at,
+            e.timezone,
+            e.location_name,
+            e.location_address,
+            e.cover_image_object_key,
+            e.pdf_attachment_object_keys,
+            e.created_at,
+            e.updated_at
+        FROM events e
+        WHERE e.id = $1
+            AND (
+                e.organizer_user_id = $2
+                OR EXISTS (
+                    SELECT 1
+                    FROM invitations i
+                    WHERE i.event_id = e.id
+                        AND i.status = 'accepted'
+                        AND (
+                            i.invitee_user_id = $2
+                            OR lower(i.invitee_email) = lower($3)
+                        )
+                )
+            )
+        "#,
+    )
+    .bind(event_id)
+    .bind(user_id)
+    .bind(user_email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
+async fn fetch_event_comments(
+    state: &AppState,
+    event_id: Uuid,
+) -> Result<Vec<EventComment>, EventError> {
+    sqlx::query_as::<_, EventComment>(
+        r#"
+        SELECT
+            id,
+            event_id,
+            author_user_id,
+            body,
+            created_at,
+            updated_at
+        FROM event_comments
+        WHERE event_id = $1
+        ORDER BY created_at ASC, id ASC
+        "#,
+    )
+    .bind(event_id)
+    .fetch_all(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
+async fn insert_event_comment(
+    state: &AppState,
+    event_id: Uuid,
+    author_user_id: Uuid,
+    body: String,
+) -> Result<EventComment, EventError> {
+    sqlx::query_as::<_, EventComment>(
+        r#"
+        INSERT INTO event_comments (
+            event_id,
+            author_user_id,
+            body
+        )
+        VALUES ($1, $2, $3)
+        RETURNING
+            id,
+            event_id,
+            author_user_id,
+            body,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(event_id)
+    .bind(author_user_id)
+    .bind(body)
+    .fetch_one(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
+async fn delete_event_comment(
+    state: &AppState,
+    event_id: Uuid,
+    comment_id: Uuid,
+    user_id: Uuid,
+) -> Result<bool, EventError> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM event_comments c
+        USING events e
+        WHERE c.id = $1
+            AND c.event_id = $2
+            AND e.id = c.event_id
+            AND (
+                c.author_user_id = $3
+                OR e.organizer_user_id = $3
+            )
+        "#,
+    )
+    .bind(comment_id)
+    .bind(event_id)
+    .bind(user_id)
+    .execute(&state.db)
+    .await
+    .map_err(EventError::Database)?;
+
+    Ok(result.rows_affected() > 0)
+}
+
 async fn fetch_event_rsvp_invitations(
     state: &AppState,
     event_id: Uuid,
@@ -1181,6 +1399,22 @@ fn normalize_rsvp_status(value: &str) -> Result<String, EventError> {
     }
 }
 
+fn normalize_comment_body(value: &str) -> Result<String, EventError> {
+    let body = value.trim();
+    if body.is_empty() {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "comment body is required"
+        )));
+    }
+    if body.chars().count() > MAX_COMMENT_BODY_CHARS {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "comment body must be {MAX_COMMENT_BODY_CHARS} characters or fewer"
+        )));
+    }
+
+    Ok(body.to_owned())
+}
+
 fn invitation_insert_error(error: sqlx::Error) -> EventError {
     if database_error_code_is(&error, "23505") {
         return EventError::BadRequest(anyhow::anyhow!(
@@ -1510,9 +1744,9 @@ impl IntoResponse for EventError {
 #[cfg(test)]
 mod tests {
     use super::{
-        cover_image_extension, escape_html, normalize_email, normalize_rsvp_status,
-        normalize_share_token, parse_required_datetime, rsvp_list_response, rsvp_status_label,
-        validate_pdf_content_type,
+        cover_image_extension, escape_html, normalize_comment_body, normalize_email,
+        normalize_rsvp_status, normalize_share_token, parse_required_datetime, rsvp_list_response,
+        rsvp_status_label, validate_pdf_content_type,
     };
     use crate::models::invitation::{Invitation, INVITATION_STATUS_ACCEPTED};
     use uuid::Uuid;
@@ -1571,6 +1805,16 @@ mod tests {
         );
         assert!(normalize_rsvp_status("soon").is_err());
         assert_eq!(rsvp_status_label("no"), "no");
+    }
+
+    #[test]
+    fn normalizes_comment_body() {
+        assert_eq!(
+            normalize_comment_body("  See you there.  ").expect("comment accepted"),
+            "See you there."
+        );
+        assert!(normalize_comment_body("   ").is_err());
+        assert!(normalize_comment_body(&"x".repeat(2001)).is_err());
     }
 
     #[test]
