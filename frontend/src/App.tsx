@@ -2,6 +2,7 @@ import { AuthProvider } from "./auth/AuthProvider";
 import { ProtectedRoute } from "./auth/ProtectedRoute";
 import AuthPage from "./pages/AuthPage";
 import DashboardPage from "./pages/DashboardPage";
+import EventCreatePage from "./pages/EventCreatePage";
 import HomePage from "./pages/HomePage";
 import ProfilePage from "./pages/ProfilePage";
 
@@ -36,6 +37,14 @@ function AppRoutes() {
     return (
       <ProtectedRoute>
         <ProfilePage />
+      </ProtectedRoute>
+    );
+  }
+
+  if (path === "/events/new") {
+    return (
+      <ProtectedRoute>
+        <EventCreatePage />
       </ProtectedRoute>
     );
   }
