@@ -55,3 +55,32 @@ pub fn is_valid_invitation_status(status: &str) -> bool {
 pub fn is_valid_rsvp_status(status: &str) -> bool {
     matches!(status, RSVP_STATUS_YES | RSVP_STATUS_NO | RSVP_STATUS_MAYBE)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        default_invitation_status, is_valid_invitation_status, is_valid_rsvp_status,
+        INVITATION_STATUS_ACCEPTED, INVITATION_STATUS_DECLINED, INVITATION_STATUS_PENDING,
+        INVITATION_STATUS_REVOKED, RSVP_STATUS_MAYBE, RSVP_STATUS_NO, RSVP_STATUS_YES,
+    };
+
+    #[test]
+    fn validates_invitation_status_values() {
+        assert_eq!(default_invitation_status(), INVITATION_STATUS_PENDING);
+        assert!(is_valid_invitation_status(INVITATION_STATUS_PENDING));
+        assert!(is_valid_invitation_status(INVITATION_STATUS_ACCEPTED));
+        assert!(is_valid_invitation_status(INVITATION_STATUS_DECLINED));
+        assert!(is_valid_invitation_status(INVITATION_STATUS_REVOKED));
+        assert!(!is_valid_invitation_status("sent"));
+        assert!(!is_valid_invitation_status("ACCEPTED"));
+    }
+
+    #[test]
+    fn validates_rsvp_status_values() {
+        assert!(is_valid_rsvp_status(RSVP_STATUS_YES));
+        assert!(is_valid_rsvp_status(RSVP_STATUS_NO));
+        assert!(is_valid_rsvp_status(RSVP_STATUS_MAYBE));
+        assert!(!is_valid_rsvp_status("pending"));
+        assert!(!is_valid_rsvp_status("YES"));
+    }
+}
