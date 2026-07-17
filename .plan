@@ -1,0 +1,53 @@
+# Architecture Plan
+
+## Product Scope
+
+This repository will implement the Gather event coordination application described by the issue set: account creation and authentication, user profiles, event creation with media uploads, invitations, one-tap RSVP, comments, activity feeds, email notifications, reminders, tests, and deployment preparation.
+
+## Module Structure
+
+- `backend/`
+  - HTTP API server with route modules grouped by domain: `auth`, `users`, `events`, `invitations`, `rsvps`, `comments`, `activity`, `uploads`, and `health`.
+  - Shared middleware for request IDs, structured logging, auth/session validation, error mapping, CORS/proxy origin handling, and validation.
+  - Service layer for business workflows such as registration, login, OAuth callback handling, password reset, event creation, invitation delivery, RSVP recording, reminder scheduling, and timeline creation.
+  - Repository/data-access layer with migrations, typed query helpers, and transaction boundaries for multi-step workflows.
+  - Integrations for object storage and the email proxy client behind small interfaces so tests can use fakes.
+- `frontend/`
+  - Route-level pages for sign-up, login, dashboard, profile, event creation, event detail, invite friends, and RSVP views.
+  - Shared UI components for forms, upload controls, protected route shells, comment threads, timeline feed items, RSVP controls, loading states, and error displays.
+  - API client module that centralizes auth headers, JSON parsing, upload requests, and consistent error handling.
+  - Auth context/provider for current user state, session refresh/validation, protected routes, and logout.
+- `shared/`
+  - Cross-stack DTOs, validation schemas, enums, and API response contracts where the chosen stack supports sharing.
+  - Canonical types for `User`, `Event`, `Invitation`, `RSVP`, `Comment`, `ActivityItem`, auth tokens/session payloads, and upload metadata.
+- `migrations/`
+  - Ordered database migrations for users, events, invitations, RSVPs, comments, activity records, password reset tokens, email verification tokens, OAuth identities, and reminder jobs.
+- `tests/`
+  - Backend unit/integration tests for auth, events, invitations, RSVP, validation, and error mapping.
+  - Frontend component/flow tests for auth, event creation, dashboard, event detail, invites, RSVP, comments, and activity feed.
+  - End-to-end happy-path test covering registration/login, profile completion, event creation, invitation, RSVP, comments, and dashboard visibility.
+- `scripts/`
+  - Local setup, migration, seed, test, build, and self-hosted deployment scripts.
+
+## Issue Dependencies
+
+- Issues #1-#6 establish project scaffolding, configuration, database, storage, email, and deployment foundations. These should land before feature work.
+- Issues #7-#15 build the authentication base. User schema (#7), password/session primitives (#8), registration (#9), login (#10), OAuth (#11), middleware (#12), password reset (#13), and frontend auth pages/context (#14-#15) should be implemented in that order.
+- Issues #16-#23 depend on authenticated users. Profile storage/upload (#16-#17) precedes event schema and APIs (#18-#20), then frontend event creation/detail/dashboard (#21-#23).
+- Issues #24-#30 depend on events. Invitation schema and endpoints (#24-#26) come before RSVP schema/API (#27-#28), then invite and RSVP frontend work (#29-#30).
+- Issues #31-#34 depend on authenticated event participation and event visibility rules. Comments and activity records should reuse event authorization and emit timeline entries from RSVP/comment/invitation workflows.
+- Issues #35-#36 depend on email proxy and event/invitation/RSVP data. Templates should be added before reminder scheduling so scheduled jobs can reuse the same rendering and delivery path.
+- Issues #37-#40 harden the system after core workflows exist: backend tests, frontend tests, E2E coverage, and validation/error review.
+- Issue #41 finalizes deployment once the application, environment contract, migrations, storage, email, scheduler, and tests are in place.
+
+## Key Design Decisions
+
+- Use a modular monolith first: one backend deployable, one frontend app, and clear domain modules. The issue set does not require service boundaries, and a monolith keeps auth, event permissions, invitations, RSVP, comments, and activity transactions straightforward.
+- Keep environment configuration explicit. `.env.example` should document database URL, JWT/session secrets, OAuth credentials, object storage settings, email proxy settings, public app URL, CORS origin, and scheduler settings without storing secrets in Git.
+- Treat `X-Forwarded-Host` and `X-Forwarded-Proto` as the source of public origin when generating links or validating same-origin requests behind the myClawTeam reverse proxy. Do not gate static assets on the raw `Host` header.
+- Prefer server-side validation at every API boundary and shared client-side schemas where practical. Error responses should use one consistent shape with machine-readable codes and human-readable messages.
+- Store uploaded profile photos, event cover images, and PDFs in object storage. Persist only object keys, public/private access intent, content type, size, and checksum metadata in the database.
+- Email delivery should flow through one proxy client and one template-rendering layer. Verification, invitation, RSVP confirmation, and password reset emails should all share link-generation and delivery error handling.
+- Use short-lived signed tokens for email verification, password reset, invitation links, and one-tap RSVP where appropriate. Persist token hashes instead of raw tokens when tokens need revocation or one-time use.
+- Activity feed entries should be append-only records emitted by domain services rather than reconstructed from unrelated tables at read time.
+- Tests should use disposable databases or isolated schemas plus fake storage/email clients so auth, event, invitation, and RSVP workflows can be tested without external services.
