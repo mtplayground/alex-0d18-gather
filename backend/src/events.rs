@@ -1,0 +1,489 @@
+use axum::{
+    extract::{DefaultBodyLimit, Extension, Multipart, State},
+    http::StatusCode,
+    middleware,
+    response::{IntoResponse, Response},
+    routing::post,
+    Json, Router,
+};
+use bytes::Bytes;
+use chrono::{DateTime, Utc};
+use serde::Serialize;
+use uuid::Uuid;
+
+use crate::{
+    auth::{middleware::require_auth, session::AuthenticatedSession},
+    models::event::Event,
+    state::AppState,
+};
+
+const MAX_EVENT_BODY_BYTES: usize = 128 * 1024 * 1024;
+const MAX_COVER_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PDF_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
+const MAX_PDF_ATTACHMENTS: usize = 20;
+
+#[derive(Debug, Default)]
+struct EventMultipartInput {
+    title: Option<String>,
+    description: Option<String>,
+    starts_at: Option<String>,
+    ends_at: Option<String>,
+    timezone: Option<String>,
+    location_name: Option<String>,
+    location_address: Option<String>,
+    cover_image: Option<UploadPart>,
+    pdf_attachments: Vec<UploadPart>,
+}
+
+#[derive(Debug)]
+struct UploadPart {
+    bytes: Bytes,
+    content_type: String,
+}
+
+#[derive(Debug)]
+struct NormalizedEventInput {
+    title: String,
+    description: Option<String>,
+    starts_at: DateTime<Utc>,
+    ends_at: Option<DateTime<Utc>>,
+    timezone: Option<String>,
+    location_name: Option<String>,
+    location_address: Option<String>,
+    cover_image: Option<UploadPart>,
+    pdf_attachments: Vec<UploadPart>,
+}
+
+#[derive(Debug, Serialize)]
+struct CreateEventResponse {
+    status: &'static str,
+    event: Event,
+}
+
+#[derive(Debug, Serialize)]
+struct EventErrorResponse {
+    code: &'static str,
+    message: String,
+}
+
+#[derive(Debug)]
+enum EventError {
+    BadRequest(anyhow::Error),
+    Multipart(axum::extract::multipart::MultipartError),
+    Storage(anyhow::Error),
+    Database(sqlx::Error),
+}
+
+pub fn protected_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/", post(create_event))
+        .layer(DefaultBodyLimit::max(MAX_EVENT_BODY_BYTES))
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+async fn create_event(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    multipart: Multipart,
+) -> Result<(StatusCode, Json<CreateEventResponse>), EventError> {
+    let input = normalize_event_input(read_event_multipart(multipart).await?)?;
+    let event_id = Uuid::new_v4();
+    let organizer_id = session.user.id;
+    let mut uploaded_keys = Vec::new();
+
+    let cover_image_object_key = match input.cover_image {
+        Some(cover_image) => {
+            let extension = cover_image_extension(&cover_image.content_type)?;
+            let relative_key = format!(
+                "events/{organizer_id}/{event_id}/cover/{}.{}",
+                Uuid::new_v4(),
+                extension
+            );
+            let stored = match upload_event_object(&state, &relative_key, cover_image).await {
+                Ok(stored) => stored,
+                Err(error) => {
+                    cleanup_uploaded_objects(&state, &uploaded_keys).await;
+                    return Err(error);
+                }
+            };
+            uploaded_keys.push(stored.clone());
+            Some(stored)
+        }
+        None => None,
+    };
+
+    let mut pdf_attachment_object_keys = Vec::with_capacity(input.pdf_attachments.len());
+    for attachment in input.pdf_attachments {
+        let relative_key = format!(
+            "events/{organizer_id}/{event_id}/attachments/{}.pdf",
+            Uuid::new_v4()
+        );
+        let stored = match upload_event_object(&state, &relative_key, attachment).await {
+            Ok(stored) => stored,
+            Err(error) => {
+                cleanup_uploaded_objects(&state, &uploaded_keys).await;
+                return Err(error);
+            }
+        };
+        uploaded_keys.push(stored.clone());
+        pdf_attachment_object_keys.push(stored);
+    }
+
+    let event = match insert_event(
+        &state,
+        event_id,
+        organizer_id,
+        input.title,
+        input.description,
+        input.starts_at,
+        input.ends_at,
+        input.timezone,
+        input.location_name,
+        input.location_address,
+        cover_image_object_key,
+        pdf_attachment_object_keys,
+    )
+    .await
+    {
+        Ok(event) => event,
+        Err(error) => {
+            cleanup_uploaded_objects(&state, &uploaded_keys).await;
+            return Err(EventError::Database(error));
+        }
+    };
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CreateEventResponse {
+            status: "event_created",
+            event,
+        }),
+    ))
+}
+
+async fn insert_event(
+    state: &AppState,
+    event_id: Uuid,
+    organizer_id: Uuid,
+    title: String,
+    description: Option<String>,
+    starts_at: DateTime<Utc>,
+    ends_at: Option<DateTime<Utc>>,
+    timezone: Option<String>,
+    location_name: Option<String>,
+    location_address: Option<String>,
+    cover_image_object_key: Option<String>,
+    pdf_attachment_object_keys: Vec<String>,
+) -> Result<Event, sqlx::Error> {
+    sqlx::query_as::<_, Event>(
+        r#"
+        INSERT INTO events (
+            id,
+            organizer_user_id,
+            title,
+            description,
+            starts_at,
+            ends_at,
+            timezone,
+            location_name,
+            location_address,
+            cover_image_object_key,
+            pdf_attachment_object_keys
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+        RETURNING
+            id,
+            organizer_user_id,
+            title,
+            description,
+            starts_at,
+            ends_at,
+            timezone,
+            location_name,
+            location_address,
+            cover_image_object_key,
+            pdf_attachment_object_keys,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(event_id)
+    .bind(organizer_id)
+    .bind(title)
+    .bind(description)
+    .bind(starts_at)
+    .bind(ends_at)
+    .bind(timezone)
+    .bind(location_name)
+    .bind(location_address)
+    .bind(cover_image_object_key)
+    .bind(pdf_attachment_object_keys)
+    .fetch_one(&state.db)
+    .await
+}
+
+async fn read_event_multipart(mut multipart: Multipart) -> Result<EventMultipartInput, EventError> {
+    let mut input = EventMultipartInput::default();
+
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(EventError::Multipart)?
+    {
+        let name = field.name().map(str::to_owned).unwrap_or_default();
+
+        match name.as_str() {
+            "title" => input.title = Some(read_text_field(field).await?),
+            "description" => input.description = Some(read_text_field(field).await?),
+            "starts_at" => input.starts_at = Some(read_text_field(field).await?),
+            "ends_at" => input.ends_at = Some(read_text_field(field).await?),
+            "timezone" => input.timezone = Some(read_text_field(field).await?),
+            "location_name" => input.location_name = Some(read_text_field(field).await?),
+            "location_address" => input.location_address = Some(read_text_field(field).await?),
+            "cover_image" | "cover" => {
+                if input.cover_image.is_some() {
+                    return Err(EventError::BadRequest(anyhow::anyhow!(
+                        "only one cover image may be uploaded"
+                    )));
+                }
+                input.cover_image = Some(read_upload_part(field, MAX_COVER_IMAGE_BYTES).await?);
+            }
+            "pdf_attachments" | "pdf_attachment" | "pdfs" | "attachments" => {
+                if input.pdf_attachments.len() >= MAX_PDF_ATTACHMENTS {
+                    return Err(EventError::BadRequest(anyhow::anyhow!(
+                        "at most {MAX_PDF_ATTACHMENTS} PDF attachments may be uploaded"
+                    )));
+                }
+                input
+                    .pdf_attachments
+                    .push(read_upload_part(field, MAX_PDF_ATTACHMENT_BYTES).await?);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(input)
+}
+
+async fn read_text_field(field: axum::extract::multipart::Field<'_>) -> Result<String, EventError> {
+    field.text().await.map_err(EventError::Multipart)
+}
+
+async fn read_upload_part(
+    field: axum::extract::multipart::Field<'_>,
+    max_bytes: usize,
+) -> Result<UploadPart, EventError> {
+    let content_type = field
+        .content_type()
+        .map(str::to_owned)
+        .ok_or_else(|| EventError::BadRequest(anyhow::anyhow!("file content type is required")))?;
+    let bytes = field.bytes().await.map_err(EventError::Multipart)?;
+
+    if bytes.is_empty() {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "uploaded file must not be empty"
+        )));
+    }
+    if bytes.len() > max_bytes {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "uploaded file exceeds the allowed size"
+        )));
+    }
+
+    Ok(UploadPart {
+        bytes,
+        content_type,
+    })
+}
+
+fn normalize_event_input(input: EventMultipartInput) -> Result<NormalizedEventInput, EventError> {
+    let title = normalize_required_text(input.title, "title", 200)?;
+    let description = normalize_optional_text(input.description, "description", 5000)?;
+    let starts_at = parse_required_datetime(input.starts_at, "starts_at")?;
+    let ends_at = parse_optional_datetime(input.ends_at, "ends_at")?;
+
+    if ends_at.is_some_and(|ends_at| ends_at <= starts_at) {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "ends_at must be later than starts_at"
+        )));
+    }
+
+    let timezone = normalize_optional_text(input.timezone, "timezone", 100)?;
+    let location_name = normalize_optional_text(input.location_name, "location_name", 200)?;
+    let location_address =
+        normalize_optional_text(input.location_address, "location_address", 500)?;
+
+    if let Some(cover_image) = input.cover_image.as_ref() {
+        cover_image_extension(&cover_image.content_type)?;
+    }
+    for attachment in &input.pdf_attachments {
+        validate_pdf_content_type(&attachment.content_type)?;
+    }
+
+    Ok(NormalizedEventInput {
+        title,
+        description,
+        starts_at,
+        ends_at,
+        timezone,
+        location_name,
+        location_address,
+        cover_image: input.cover_image,
+        pdf_attachments: input.pdf_attachments,
+    })
+}
+
+fn normalize_required_text(
+    value: Option<String>,
+    field: &'static str,
+    max_len: usize,
+) -> Result<String, EventError> {
+    let value = normalize_optional_text(value, field, max_len)?;
+    value.ok_or_else(|| EventError::BadRequest(anyhow::anyhow!("{field} is required")))
+}
+
+fn normalize_optional_text(
+    value: Option<String>,
+    field: &'static str,
+    max_len: usize,
+) -> Result<Option<String>, EventError> {
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    if value.chars().count() > max_len {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "{field} must be {max_len} characters or fewer"
+        )));
+    }
+
+    Ok(Some(value.to_owned()))
+}
+
+fn parse_required_datetime(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<DateTime<Utc>, EventError> {
+    parse_optional_datetime(value, field)?
+        .ok_or_else(|| EventError::BadRequest(anyhow::anyhow!("{field} is required")))
+}
+
+fn parse_optional_datetime(
+    value: Option<String>,
+    field: &'static str,
+) -> Result<Option<DateTime<Utc>>, EventError> {
+    let Some(value) = normalize_optional_text(value, field, 64)? else {
+        return Ok(None);
+    };
+
+    DateTime::parse_from_rfc3339(&value)
+        .map(|value| Some(value.with_timezone(&Utc)))
+        .map_err(|error| {
+            EventError::BadRequest(anyhow::anyhow!("{field} must be RFC3339: {error}"))
+        })
+}
+
+fn cover_image_extension(content_type: &str) -> Result<&'static str, EventError> {
+    match content_type {
+        "image/jpeg" => Ok("jpg"),
+        "image/png" => Ok("png"),
+        "image/webp" => Ok("webp"),
+        "image/gif" => Ok("gif"),
+        _ => Err(EventError::BadRequest(anyhow::anyhow!(
+            "cover image must be a JPEG, PNG, WEBP, or GIF image"
+        ))),
+    }
+}
+
+fn validate_pdf_content_type(content_type: &str) -> Result<(), EventError> {
+    if content_type == "application/pdf" {
+        return Ok(());
+    }
+
+    Err(EventError::BadRequest(anyhow::anyhow!(
+        "attachments must be PDF files"
+    )))
+}
+
+async fn upload_event_object(
+    state: &AppState,
+    relative_key: &str,
+    upload: UploadPart,
+) -> Result<String, EventError> {
+    state
+        .storage
+        .put_object(
+            relative_key,
+            upload.bytes,
+            Some(upload.content_type.as_str()),
+        )
+        .await
+        .map(|stored| stored.relative_key)
+        .map_err(EventError::Storage)
+}
+
+async fn cleanup_uploaded_objects(state: &AppState, relative_keys: &[String]) {
+    for key in relative_keys {
+        if let Err(error) = state.storage.delete_object(key).await {
+            tracing::warn!(%error, object_key = %key, "failed to clean up event upload after create failure");
+        }
+    }
+}
+
+impl IntoResponse for EventError {
+    fn into_response(self) -> Response {
+        let (status, code, message) = match self {
+            Self::BadRequest(error) => (StatusCode::BAD_REQUEST, "bad_request", error.to_string()),
+            Self::Multipart(error) => (
+                StatusCode::BAD_REQUEST,
+                "invalid_multipart",
+                format!("event upload could not be read: {error}"),
+            ),
+            Self::Storage(error) => {
+                tracing::error!(%error, "event object storage operation failed");
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "event_storage_unavailable",
+                    "event files could not be stored; try again shortly".to_owned(),
+                )
+            }
+            Self::Database(error) => {
+                tracing::error!(%error, "event database operation failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "event_create_failed",
+                    "event could not be created".to_owned(),
+                )
+            }
+        };
+
+        (status, Json(EventErrorResponse { code, message })).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{cover_image_extension, parse_required_datetime, validate_pdf_content_type};
+
+    #[test]
+    fn validates_event_upload_content_types() {
+        assert_eq!(
+            cover_image_extension("image/jpeg").expect("jpeg accepted"),
+            "jpg"
+        );
+        assert!(cover_image_extension("application/pdf").is_err());
+        assert!(validate_pdf_content_type("application/pdf").is_ok());
+        assert!(validate_pdf_content_type("image/png").is_err());
+    }
+
+    #[test]
+    fn parses_rfc3339_datetime() {
+        let parsed = parse_required_datetime(Some("2026-08-01T18:00:00Z".to_owned()), "starts_at")
+            .expect("valid timestamp");
+        assert_eq!(parsed.to_rfc3339(), "2026-08-01T18:00:00+00:00");
+        assert!(parse_required_datetime(Some("tomorrow".to_owned()), "starts_at").is_err());
+    }
+}

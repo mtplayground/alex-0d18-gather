@@ -2,6 +2,7 @@ mod auth;
 mod config;
 mod db;
 mod email;
+mod events;
 mod models;
 mod routes;
 mod state;
