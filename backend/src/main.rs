@@ -2,6 +2,7 @@ mod config;
 mod db;
 mod routes;
 mod state;
+mod storage;
 
 use anyhow::Context;
 use config::Config;
@@ -24,12 +25,14 @@ async fn main() -> anyhow::Result<()> {
     db::run_migrations(&pool)
         .await
         .context("failed to run database migrations")?;
+    let storage = storage::ObjectStorage::from_config(&config.object_storage)
+        .context("failed to configure object storage client")?;
 
     let addr = config.server.socket_addr()?;
     let listener = TcpListener::bind(addr)
         .await
         .with_context(|| format!("failed to bind API server on {addr}"))?;
-    let state = AppState::new(pool);
+    let state = AppState::new(pool, storage);
 
     tracing::info!(%addr, "Gather API listening");
 
