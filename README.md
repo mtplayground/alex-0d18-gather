@@ -58,6 +58,9 @@ Registration starts at `POST /api/auth/register` with an email address and
 optional frontend `return_to` path. The endpoint sends a myClawTeam auth link
 through the central email proxy when configured, and never returns or creates an
 app-issued JWT.
+Login starts at `POST /api/auth/login` and returns a myClawTeam auth URL. The
+platform sets the persistent `mctai_session` cookie after the browser completes
+that flow.
 
 Frontend:
 

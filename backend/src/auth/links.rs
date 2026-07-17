@@ -24,6 +24,14 @@ impl AuthLinkConfig {
     }
 
     pub fn registration_url(&self, return_path: Option<&str>) -> anyhow::Result<String> {
+        self.auth_url_for_return_path(return_path)
+    }
+
+    pub fn login_url(&self, return_path: Option<&str>) -> anyhow::Result<String> {
+        self.auth_url_for_return_path(return_path)
+    }
+
+    fn auth_url_for_return_path(&self, return_path: Option<&str>) -> anyhow::Result<String> {
         let path = normalize_return_path(return_path)?;
         let return_to = format!("{}{}", self.public_base_url, path);
 
@@ -95,6 +103,18 @@ mod tests {
             .expect("registration link should build");
 
         assert!(url.ends_with("return_to=https%3A%2F%2Fgather.example%2F"));
+    }
+
+    #[test]
+    fn builds_login_link_to_frontend_page() {
+        let url = config()
+            .login_url(Some("/profile"))
+            .expect("login link should build");
+
+        assert_eq!(
+            url,
+            "https://auth.mctai.app/login?app_token=app_test_token&return_to=https%3A%2F%2Fgather.example%2Fprofile"
+        );
     }
 
     #[test]
