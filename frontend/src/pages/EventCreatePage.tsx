@@ -327,7 +327,12 @@ function EventCreatePage() {
                 >
                   <p>{message}</p>
                   {createdEventId ? (
-                    <p className="mt-1 font-semibold">Event ID {createdEventId}</p>
+                    <a
+                      className="mt-2 inline-block font-semibold"
+                      href={`/events/${createdEventId}`}
+                    >
+                      Open event detail
+                    </a>
                   ) : null}
                 </div>
               ) : null}
