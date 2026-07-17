@@ -1,5 +1,5 @@
 use sqlx::postgres::PgSslMode;
-use std::{env, fmt, net::SocketAddr, time::Duration};
+use std::{env, fmt, net::SocketAddr, path::PathBuf, time::Duration};
 
 #[derive(Clone)]
 pub struct Config {
@@ -18,6 +18,7 @@ pub struct ServerConfig {
     pub port: u16,
     pub self_url: Option<String>,
     pub allowed_cors_origin: Option<String>,
+    pub frontend_dist_dir: Option<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -83,6 +84,7 @@ impl ServerConfig {
             port,
             self_url: optional_env("SELF_URL"),
             allowed_cors_origin: optional_env("ALLOWED_CORS_ORIGIN"),
+            frontend_dist_dir: optional_env("FRONTEND_DIST_DIR").map(PathBuf::from),
         })
     }
 

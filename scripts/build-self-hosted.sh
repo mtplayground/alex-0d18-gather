@@ -12,8 +12,36 @@ require_command() {
   fi
 }
 
-require_command cargo
-require_command npm
+find_cargo() {
+  if [[ -n "${CARGO_BIN:-}" ]]; then
+    echo "${CARGO_BIN}"
+    return
+  fi
+  if command -v cargo >/dev/null 2>&1; then
+    command -v cargo
+    return
+  fi
+  local rustup_root="${RUSTUP_HOME:-/usr/local/rustup}"
+  local candidate
+  candidate="$(find "${rustup_root}/toolchains" -path '*/bin/cargo' -type f 2>/dev/null | sort -V | tail -n 1 || true)"
+  if [[ -n "${candidate}" ]]; then
+    echo "${candidate}"
+    return
+  fi
+  echo "cargo"
+}
+
+CARGO_BIN="$(find_cargo)"
+NPM_BIN="${NPM_BIN:-npm}"
+
+if [[ ! -x "${CARGO_BIN}" ]] && ! command -v "${CARGO_BIN}" >/dev/null 2>&1; then
+  echo "missing required command: ${CARGO_BIN}" >&2
+  exit 1
+fi
+if [[ -z "${RUSTC:-}" && -x "$(dirname "${CARGO_BIN}")/rustc" ]]; then
+  export RUSTC="$(dirname "${CARGO_BIN}")/rustc"
+fi
+require_command "${NPM_BIN}"
 
 if [[ -z "${OUT_DIR}" || "${OUT_DIR}" == "/" ]]; then
   echo "refusing to use unsafe OUT_DIR=${OUT_DIR}" >&2
@@ -24,17 +52,17 @@ echo "Building Gather frontend"
 (
   cd "${ROOT_DIR}/frontend"
   if [[ -f package-lock.json ]]; then
-    npm ci
+    "${NPM_BIN}" ci
   else
-    npm install
+    "${NPM_BIN}" install
   fi
-  npm run build
+  "${NPM_BIN}" run build
 )
 
 echo "Building Gather backend"
 (
   cd "${ROOT_DIR}"
-  cargo build --release -p gather-api
+  "${CARGO_BIN}" build --release -p gather-api
 )
 
 echo "Packaging self-hosted directory: ${OUT_DIR}"

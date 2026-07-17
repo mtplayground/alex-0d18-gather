@@ -46,15 +46,12 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(%addr, "Gather API listening");
 
-    axum::serve(
-        listener,
-        routes::app(state)
-            .layer(TraceLayer::new_for_http())
-            .into_make_service(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await
-    .context("API server exited with an error")
+    let app = routes::app(state, &config.server)?.layer(TraceLayer::new_for_http());
+
+    axum::serve(listener, app.into_make_service())
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+        .context("API server exited with an error")
 }
 
 async fn shutdown_signal() {
