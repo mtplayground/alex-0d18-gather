@@ -18,7 +18,10 @@ use crate::{
     email::{EmailMessage, EmailSendOutcome},
     models::{
         event::Event,
-        invitation::{Invitation, INVITATION_STATUS_ACCEPTED, INVITATION_STATUS_PENDING},
+        invitation::{
+            Invitation, INVITATION_STATUS_ACCEPTED, INVITATION_STATUS_DECLINED,
+            INVITATION_STATUS_PENDING, RSVP_STATUS_MAYBE, RSVP_STATUS_NO, RSVP_STATUS_YES,
+        },
     },
     state::AppState,
 };
@@ -148,6 +151,19 @@ struct AcceptInvitationResponse {
     event: Event,
 }
 
+#[derive(Debug, Deserialize)]
+struct RsvpRequest {
+    status: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RsvpResponse {
+    status: &'static str,
+    invitation: Invitation,
+    event: Event,
+    email_sent: bool,
+}
+
 #[derive(Debug, Serialize)]
 struct EventErrorResponse {
     code: &'static str,
@@ -182,6 +198,7 @@ pub fn protected_router(state: AppState) -> Router<AppState> {
 pub fn invitation_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/:share_token/accept", post(accept_invitation))
+        .route("/:share_token/rsvp", post(update_rsvp))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -340,6 +357,54 @@ async fn accept_invitation(
         status: "invitation_accepted",
         invitation,
         event,
+    }))
+}
+
+async fn update_rsvp(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(share_token): Path<String>,
+    Json(payload): Json<RsvpRequest>,
+) -> Result<Json<RsvpResponse>, EventError> {
+    let share_token = normalize_share_token(&share_token)?;
+    let rsvp_status = normalize_rsvp_status(&payload.status)?;
+    let invitation = fetch_invitation_by_token(&state, &share_token)
+        .await?
+        .ok_or(EventError::NotFound)?;
+
+    if invitation.status == "revoked" {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitation is no longer active"
+        )));
+    }
+    if invitation
+        .invitee_user_id
+        .is_some_and(|invitee_user_id| invitee_user_id != session.user.id)
+    {
+        return Err(EventError::Forbidden(anyhow::anyhow!(
+            "invitation belongs to another user"
+        )));
+    }
+
+    let invitation = update_invitation_rsvp(
+        &state,
+        &share_token,
+        &rsvp_status,
+        session.user.id,
+        session.user.email.clone(),
+    )
+    .await?;
+    let event = fetch_event_by_id(&state, invitation.event_id)
+        .await?
+        .ok_or(EventError::NotFound)?;
+    let email_sent =
+        send_rsvp_confirmation(&state, &event, &invitation, session.user.email.as_str()).await;
+
+    Ok(Json(RsvpResponse {
+        status: "rsvp_updated",
+        invitation,
+        event,
+        email_sent,
     }))
 }
 
@@ -506,6 +571,8 @@ async fn insert_invitation(
             invitee_email,
             status,
             share_token,
+            rsvp_status,
+            rsvp_responded_at,
             created_at,
             updated_at
         "#,
@@ -531,6 +598,8 @@ async fn fetch_invitation_by_token(
             invitee_email,
             status,
             share_token,
+            rsvp_status,
+            rsvp_responded_at,
             created_at,
             updated_at
         FROM invitations
@@ -567,6 +636,8 @@ async fn accept_invitation_by_token(
             invitee_email,
             status,
             share_token,
+            rsvp_status,
+            rsvp_responded_at,
             created_at,
             updated_at
         "#,
@@ -575,6 +646,56 @@ async fn accept_invitation_by_token(
     .bind(INVITATION_STATUS_ACCEPTED)
     .bind(user_id)
     .bind(user_email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(EventError::Database)?
+    .ok_or(EventError::NotFound)
+}
+
+async fn update_invitation_rsvp(
+    state: &AppState,
+    share_token: &str,
+    rsvp_status: &str,
+    user_id: Uuid,
+    user_email: String,
+) -> Result<Invitation, EventError> {
+    let invitation_status = match rsvp_status {
+        RSVP_STATUS_NO => INVITATION_STATUS_DECLINED,
+        RSVP_STATUS_YES | RSVP_STATUS_MAYBE => INVITATION_STATUS_ACCEPTED,
+        _ => INVITATION_STATUS_PENDING,
+    };
+
+    sqlx::query_as::<_, Invitation>(
+        r#"
+        UPDATE invitations
+        SET
+            status = $2,
+            invitee_user_id = COALESCE(invitee_user_id, $3),
+            invitee_email = COALESCE(invitee_email, $4),
+            rsvp_status = $5,
+            rsvp_responded_at = NOW(),
+            updated_at = NOW()
+        WHERE share_token = $1
+            AND status <> 'revoked'
+            AND (invitee_user_id IS NULL OR invitee_user_id = $3)
+        RETURNING
+            id,
+            event_id,
+            invitee_user_id,
+            invitee_email,
+            status,
+            share_token,
+            rsvp_status,
+            rsvp_responded_at,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(share_token)
+    .bind(invitation_status)
+    .bind(user_id)
+    .bind(user_email)
+    .bind(rsvp_status)
     .fetch_optional(&state.db)
     .await
     .map_err(EventError::Database)?
@@ -938,6 +1059,16 @@ fn normalize_share_token(value: &str) -> Result<String, EventError> {
     Ok(token.to_owned())
 }
 
+fn normalize_rsvp_status(value: &str) -> Result<String, EventError> {
+    let status = value.trim().to_ascii_lowercase();
+    match status.as_str() {
+        RSVP_STATUS_YES | RSVP_STATUS_NO | RSVP_STATUS_MAYBE => Ok(status),
+        _ => Err(EventError::BadRequest(anyhow::anyhow!(
+            "rsvp status must be yes, no, or maybe"
+        ))),
+    }
+}
+
 fn invitation_insert_error(error: sqlx::Error) -> EventError {
     if database_error_code_is(&error, "23505") {
         return EventError::BadRequest(anyhow::anyhow!(
@@ -983,6 +1114,93 @@ fn invitation_message(event: &Event, invitee_email: &str, invitation_url: &str) 
             event.title, starts_at, location, invitation_url
         )),
         reply_to: None,
+    }
+}
+
+async fn send_rsvp_confirmation(
+    state: &AppState,
+    event: &Event,
+    invitation: &Invitation,
+    recipient: &str,
+) -> bool {
+    let Some(rsvp_status) = invitation.rsvp_status.as_deref() else {
+        return false;
+    };
+    let message = rsvp_confirmation_message(event, recipient, rsvp_status);
+
+    match state.email.send(message).await {
+        Ok(EmailSendOutcome::Sent { message_id }) => {
+            tracing::info!(
+                %message_id,
+                event_id = %event.id,
+                invitation_id = %invitation.id,
+                invitee_email = %recipient,
+                rsvp_status = %rsvp_status,
+                "rsvp confirmation email sent"
+            );
+            true
+        }
+        Ok(EmailSendOutcome::Skipped { reason }) => {
+            tracing::warn!(
+                %reason,
+                event_id = %event.id,
+                invitation_id = %invitation.id,
+                invitee_email = %recipient,
+                rsvp_status = %rsvp_status,
+                "rsvp confirmation email skipped"
+            );
+            false
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                event_id = %event.id,
+                invitation_id = %invitation.id,
+                invitee_email = %recipient,
+                rsvp_status = %rsvp_status,
+                "rsvp confirmation email failed"
+            );
+            false
+        }
+    }
+}
+
+fn rsvp_confirmation_message(event: &Event, recipient: &str, rsvp_status: &str) -> EmailMessage {
+    let title = escape_html(&event.title);
+    let escaped_recipient = escape_html(recipient);
+    let escaped_status = escape_html(rsvp_status_label(rsvp_status));
+    let starts_at = event.starts_at.to_rfc3339();
+    let location = event
+        .location_name
+        .as_deref()
+        .unwrap_or("Location to be announced");
+    let escaped_location = escape_html(location);
+
+    EmailMessage {
+        to: vec![recipient.to_owned()],
+        subject: format!("RSVP confirmed: {}", event.title),
+        html: Some(format!(
+            r#"<p>Hello {escaped_recipient},</p>
+<p>Your RSVP for <strong>{title}</strong> is confirmed as <strong>{escaped_status}</strong>.</p>
+<p><strong>When:</strong> {starts_at}<br><strong>Where:</strong> {escaped_location}</p>"#
+        )),
+        text: Some(format!(
+            "Your RSVP for {} is confirmed as {}.\n\nWhen: {}\nWhere: {}",
+            event.title,
+            rsvp_status_label(rsvp_status),
+            starts_at,
+            location
+        )),
+        reply_to: None,
+    }
+}
+
+fn rsvp_status_label(status: &str) -> &'static str {
+    match status {
+        RSVP_STATUS_YES => "yes",
+        RSVP_STATUS_NO => "no",
+        RSVP_STATUS_MAYBE => "maybe",
+        _ => "unknown",
     }
 }
 
@@ -1180,8 +1398,9 @@ impl IntoResponse for EventError {
 #[cfg(test)]
 mod tests {
     use super::{
-        cover_image_extension, escape_html, normalize_email, normalize_share_token,
-        parse_required_datetime, validate_pdf_content_type,
+        cover_image_extension, escape_html, normalize_email, normalize_rsvp_status,
+        normalize_share_token, parse_required_datetime, rsvp_status_label,
+        validate_pdf_content_type,
     };
 
     #[test]
@@ -1227,5 +1446,16 @@ mod tests {
             "abc123"
         );
         assert!(normalize_share_token("").is_err());
+    }
+
+    #[test]
+    fn validates_rsvp_statuses() {
+        assert_eq!(normalize_rsvp_status(" YES ").expect("yes accepted"), "yes");
+        assert_eq!(
+            normalize_rsvp_status("maybe").expect("maybe accepted"),
+            "maybe"
+        );
+        assert!(normalize_rsvp_status("soon").is_err());
+        assert_eq!(rsvp_status_label("no"), "no");
     }
 }
