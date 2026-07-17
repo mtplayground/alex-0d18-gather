@@ -3,6 +3,7 @@ import { ProtectedRoute } from "./auth/ProtectedRoute";
 import AuthPage from "./pages/AuthPage";
 import DashboardPage from "./pages/DashboardPage";
 import HomePage from "./pages/HomePage";
+import ProfilePage from "./pages/ProfilePage";
 
 function App() {
   return (
@@ -27,6 +28,14 @@ function AppRoutes() {
     return (
       <ProtectedRoute>
         <DashboardPage />
+      </ProtectedRoute>
+    );
+  }
+
+  if (path === "/profile") {
+    return (
+      <ProtectedRoute>
+        <ProfilePage />
       </ProtectedRoute>
     );
   }
