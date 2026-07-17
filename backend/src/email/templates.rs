@@ -20,6 +20,16 @@ pub struct RsvpConfirmationTemplate<'a> {
     pub location: &'a str,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct EventReminderTemplate<'a> {
+    pub recipient_email: &'a str,
+    pub event_title: &'a str,
+    pub starts_at: &'a str,
+    pub location: &'a str,
+    pub event_url: &'a str,
+    pub rsvp_status_label: &'a str,
+}
+
 pub fn verification(email: &str, auth_url: &str) -> EmailMessage {
     let escaped_url = escape_html(auth_url);
     let preheader = "Verify your email address and finish creating your Gather account.";
@@ -151,6 +161,45 @@ pub fn rsvp_confirmation(template: RsvpConfirmationTemplate<'_>) -> EmailMessage
     }
 }
 
+pub fn event_reminder(template: EventReminderTemplate<'_>) -> EmailMessage {
+    let escaped_title = escape_html(template.event_title);
+    let escaped_location = escape_html(template.location);
+    let escaped_status = escape_html(template.rsvp_status_label);
+    let escaped_url = escape_html(template.event_url);
+    let preheader = format!("Reminder: {} is coming up soon.", template.event_title);
+    let html = email_layout(
+        "Event reminder",
+        &preheader,
+        &format!(
+            r#"<p><strong>{escaped_title}</strong> is coming up soon.</p>
+<p>Your RSVP is currently marked as <strong>{escaped_status}</strong>.</p>
+<table role="presentation" cellpadding="0" cellspacing="0" style="margin:20px 0;width:100%;border-collapse:collapse;">
+<tr><td style="padding:8px 0;color:#475569;width:84px;">When</td><td style="padding:8px 0;color:#0f172a;font-weight:600;">{}</td></tr>
+<tr><td style="padding:8px 0;color:#475569;width:84px;">Where</td><td style="padding:8px 0;color:#0f172a;font-weight:600;">{escaped_location}</td></tr>
+</table>
+{}"#,
+            escape_html(template.starts_at),
+            action_link(&escaped_url, "Open event")
+        ),
+    );
+    let text = format!(
+        "{} is coming up soon.\n\nYour RSVP is currently marked as {}.\n\nWhen: {}\nWhere: {}\n\nOpen event: {}",
+        template.event_title,
+        template.rsvp_status_label,
+        template.starts_at,
+        template.location,
+        template.event_url
+    );
+
+    EmailMessage {
+        to: vec![template.recipient_email.to_owned()],
+        subject: format!("Reminder: {}", template.event_title),
+        html: Some(html),
+        text: Some(text),
+        reply_to: None,
+    }
+}
+
 fn email_layout(title: &str, preheader: &str, body: &str) -> String {
     format!(
         r#"<!doctype html>
@@ -200,8 +249,8 @@ fn escape_html(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        event_invitation, password_reset, rsvp_confirmation, verification, EventInvitationTemplate,
-        RsvpConfirmationTemplate,
+        event_invitation, event_reminder, password_reset, rsvp_confirmation, verification,
+        EventInvitationTemplate, EventReminderTemplate, RsvpConfirmationTemplate,
     };
 
     #[test]
@@ -263,5 +312,24 @@ mod tests {
         assert_eq!(message.subject, "RSVP confirmed: Planning");
         assert!(message.html.expect("html").contains("maybe"));
         assert!(message.text.expect("text").contains("confirmed as maybe"));
+    }
+
+    #[test]
+    fn reminder_template_includes_event_link() {
+        let message = event_reminder(EventReminderTemplate {
+            recipient_email: "person@example.com",
+            event_title: "Planning",
+            starts_at: "2026-08-01T18:00:00Z",
+            location: "Room 1",
+            event_url: "https://example.com/events/event-id",
+            rsvp_status_label: "yes",
+        });
+
+        assert_eq!(message.subject, "Reminder: Planning");
+        assert!(message.html.expect("html").contains("Open event"));
+        assert!(message
+            .text
+            .expect("text")
+            .contains("https://example.com/events/event-id"));
     }
 }
