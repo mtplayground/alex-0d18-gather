@@ -13,7 +13,7 @@ use uuid::Uuid;
 
 use crate::{
     auth::{middleware::require_auth, session::AuthenticatedSession},
-    email::{EmailMessage, EmailSendOutcome},
+    email::{templates, EmailSendOutcome},
     models::user::UserProfile,
     state::AppState,
 };
@@ -136,7 +136,7 @@ async fn register(
         .registration_url(payload.return_to.as_deref())
         .map_err(RegisterError::BadRequest)?;
 
-    let message = verification_message(&email, &auth_url);
+    let message = templates::verification(&email, &auth_url);
     let email_sent = match state.email.send(message).await {
         Ok(EmailSendOutcome::Sent { message_id }) => {
             tracing::info!(%message_id, email = %email, "registration verification email sent");
@@ -209,7 +209,7 @@ async fn request_password_reset(
         .password_reset_url(payload.return_to.as_deref())
         .map_err(RegisterError::BadRequest)?;
 
-    let message = password_reset_message(&email, &auth_url);
+    let message = templates::password_reset(&email, &auth_url);
     let email_sent = match state.email.send(message).await {
         Ok(EmailSendOutcome::Sent { message_id }) => {
             tracing::info!(%message_id, email = %email, "password reset email sent");
@@ -570,50 +570,6 @@ fn normalize_email(email: &str) -> Result<String, RegisterError> {
     }
 
     Ok(normalized)
-}
-
-fn verification_message(email: &str, auth_url: &str) -> EmailMessage {
-    let html = format!(
-        r#"
-        <p>Welcome to Gather.</p>
-        <p>Use this secure link to verify your email address and finish registration:</p>
-        <p><a href="{auth_url}">Complete registration</a></p>
-        <p>If you did not request this, you can ignore this email.</p>
-        "#
-    );
-    let text = format!(
-        "Welcome to Gather.\n\nUse this secure link to verify your email address and finish registration:\n{auth_url}\n\nIf you did not request this, you can ignore this email."
-    );
-
-    EmailMessage {
-        to: vec![email.to_owned()],
-        subject: "Complete your Gather registration".to_owned(),
-        html: Some(html),
-        text: Some(text),
-        reply_to: None,
-    }
-}
-
-fn password_reset_message(email: &str, auth_url: &str) -> EmailMessage {
-    let html = format!(
-        r#"
-        <p>We received a request to restore access to your Gather account.</p>
-        <p>Use this secure myClawTeam auth link to continue:</p>
-        <p><a href="{auth_url}">Continue account recovery</a></p>
-        <p>If you did not request this, you can ignore this email.</p>
-        "#
-    );
-    let text = format!(
-        "We received a request to restore access to your Gather account.\n\nUse this secure myClawTeam auth link to continue:\n{auth_url}\n\nIf you did not request this, you can ignore this email."
-    );
-
-    EmailMessage {
-        to: vec![email.to_owned()],
-        subject: "Restore access to your Gather account".to_owned(),
-        html: Some(html),
-        text: Some(text),
-        reply_to: None,
-    }
 }
 
 #[derive(Debug)]
