@@ -18,7 +18,7 @@ use crate::{
     email::{EmailMessage, EmailSendOutcome},
     models::{
         event::Event,
-        invitation::{Invitation, INVITATION_STATUS_PENDING},
+        invitation::{Invitation, INVITATION_STATUS_ACCEPTED, INVITATION_STATUS_PENDING},
     },
     state::AppState,
 };
@@ -135,6 +135,20 @@ struct CreateInvitationResponse {
 }
 
 #[derive(Debug, Serialize)]
+struct InvitationLinkResponse {
+    status: &'static str,
+    invitation: Invitation,
+    invitation_url: String,
+}
+
+#[derive(Debug, Serialize)]
+struct AcceptInvitationResponse {
+    status: &'static str,
+    invitation: Invitation,
+    event: Event,
+}
+
+#[derive(Debug, Serialize)]
 struct EventErrorResponse {
     code: &'static str,
     message: String,
@@ -143,6 +157,7 @@ struct EventErrorResponse {
 #[derive(Debug)]
 enum EventError {
     BadRequest(anyhow::Error),
+    Forbidden(anyhow::Error),
     NotFound,
     Multipart(axum::extract::multipart::MultipartError),
     Storage(anyhow::Error),
@@ -154,9 +169,19 @@ pub fn protected_router(state: AppState) -> Router<AppState> {
     Router::new()
         .route("/dashboard", get(list_dashboard_events))
         .route("/:event_id/invitations", post(create_invitation))
+        .route(
+            "/:event_id/invitations/share-link",
+            post(create_invitation_share_link),
+        )
         .route("/:event_id", get(get_event_detail))
         .route("/", post(create_event))
         .layer(DefaultBodyLimit::max(MAX_EVENT_BODY_BYTES))
+        .route_layer(middleware::from_fn_with_state(state, require_auth))
+}
+
+pub fn invitation_router(state: AppState) -> Router<AppState> {
+    Router::new()
+        .route("/:share_token/accept", post(accept_invitation))
         .route_layer(middleware::from_fn_with_state(state, require_auth))
 }
 
@@ -205,11 +230,7 @@ async fn create_invitation(
     )
     .await
     .map_err(invitation_insert_error)?;
-    let invitation_path = format!("/invitations/{}", invitation.share_token);
-    let invitation_url = state
-        .auth_links
-        .login_url(Some(&invitation_path))
-        .map_err(EventError::BadRequest)?;
+    let invitation_url = invitation_url(&state, &invitation)?;
 
     let message = invitation_message(&event, &input.invitee_email, &invitation_url);
     let email_sent = match state.email.send(message).await {
@@ -252,6 +273,74 @@ async fn create_invitation(
             email_sent,
         }),
     ))
+}
+
+async fn create_invitation_share_link(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(event_id): Path<Uuid>,
+    Json(payload): Json<CreateInvitationRequest>,
+) -> Result<(StatusCode, Json<InvitationLinkResponse>), EventError> {
+    let event = fetch_hosted_event(&state, session.user.id, event_id)
+        .await?
+        .ok_or(EventError::NotFound)?;
+    let input = normalize_invitation_input(&state, payload).await?;
+    let invitation =
+        insert_invitation(&state, event.id, input.invitee_user_id, input.invitee_email)
+            .await
+            .map_err(invitation_insert_error)?;
+    let invitation_url = invitation_url(&state, &invitation)?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(InvitationLinkResponse {
+            status: "invitation_link_created",
+            invitation,
+            invitation_url,
+        }),
+    ))
+}
+
+async fn accept_invitation(
+    State(state): State<AppState>,
+    Extension(session): Extension<AuthenticatedSession>,
+    Path(share_token): Path<String>,
+) -> Result<Json<AcceptInvitationResponse>, EventError> {
+    let share_token = normalize_share_token(&share_token)?;
+    let invitation = fetch_invitation_by_token(&state, &share_token)
+        .await?
+        .ok_or(EventError::NotFound)?;
+
+    if invitation.status == "revoked" {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitation is no longer active"
+        )));
+    }
+    if invitation
+        .invitee_user_id
+        .is_some_and(|invitee_user_id| invitee_user_id != session.user.id)
+    {
+        return Err(EventError::Forbidden(anyhow::anyhow!(
+            "invitation belongs to another user"
+        )));
+    }
+
+    let invitation = accept_invitation_by_token(
+        &state,
+        &share_token,
+        session.user.id,
+        session.user.email.clone(),
+    )
+    .await?;
+    let event = fetch_event_by_id(&state, invitation.event_id)
+        .await?
+        .ok_or(EventError::NotFound)?;
+
+    Ok(Json(AcceptInvitationResponse {
+        status: "invitation_accepted",
+        invitation,
+        event,
+    }))
 }
 
 async fn create_event(
@@ -429,6 +518,69 @@ async fn insert_invitation(
     .await
 }
 
+async fn fetch_invitation_by_token(
+    state: &AppState,
+    share_token: &str,
+) -> Result<Option<Invitation>, EventError> {
+    sqlx::query_as::<_, Invitation>(
+        r#"
+        SELECT
+            id,
+            event_id,
+            invitee_user_id,
+            invitee_email,
+            status,
+            share_token,
+            created_at,
+            updated_at
+        FROM invitations
+        WHERE share_token = $1
+        "#,
+    )
+    .bind(share_token)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
+async fn accept_invitation_by_token(
+    state: &AppState,
+    share_token: &str,
+    user_id: Uuid,
+    user_email: String,
+) -> Result<Invitation, EventError> {
+    sqlx::query_as::<_, Invitation>(
+        r#"
+        UPDATE invitations
+        SET
+            status = $2,
+            invitee_user_id = COALESCE(invitee_user_id, $3),
+            invitee_email = COALESCE(invitee_email, $4),
+            updated_at = NOW()
+        WHERE share_token = $1
+            AND status <> 'revoked'
+            AND (invitee_user_id IS NULL OR invitee_user_id = $3)
+        RETURNING
+            id,
+            event_id,
+            invitee_user_id,
+            invitee_email,
+            status,
+            share_token,
+            created_at,
+            updated_at
+        "#,
+    )
+    .bind(share_token)
+    .bind(INVITATION_STATUS_ACCEPTED)
+    .bind(user_id)
+    .bind(user_email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(EventError::Database)?
+    .ok_or(EventError::NotFound)
+}
+
 async fn cleanup_invitation_after_email_failure(state: &AppState, invitation_id: Uuid) {
     if let Err(error) = sqlx::query(
         r#"
@@ -475,6 +627,33 @@ async fn fetch_hosted_event(
     )
     .bind(event_id)
     .bind(user_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(EventError::Database)
+}
+
+async fn fetch_event_by_id(state: &AppState, event_id: Uuid) -> Result<Option<Event>, EventError> {
+    sqlx::query_as::<_, Event>(
+        r#"
+        SELECT
+            id,
+            organizer_user_id,
+            title,
+            description,
+            starts_at,
+            ends_at,
+            timezone,
+            location_name,
+            location_address,
+            cover_image_object_key,
+            pdf_attachment_object_keys,
+            created_at,
+            updated_at
+        FROM events
+        WHERE id = $1
+        "#,
+    )
+    .bind(event_id)
     .fetch_optional(&state.db)
     .await
     .map_err(EventError::Database)
@@ -595,6 +774,14 @@ async fn signed_asset(
         object_key: object_key.to_owned(),
         url,
     }))
+}
+
+fn invitation_url(state: &AppState, invitation: &Invitation) -> Result<String, EventError> {
+    let invitation_path = format!("/invitations/{}", invitation.share_token);
+    state
+        .auth_links
+        .login_url(Some(&invitation_path))
+        .map_err(EventError::BadRequest)
 }
 
 async fn read_event_multipart(mut multipart: Multipart) -> Result<EventMultipartInput, EventError> {
@@ -733,6 +920,22 @@ fn normalize_email(value: &str) -> Result<String, EventError> {
     }
 
     Ok(email)
+}
+
+fn normalize_share_token(value: &str) -> Result<String, EventError> {
+    let token = value.trim();
+    if token.is_empty() {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitation token is required"
+        )));
+    }
+    if token.len() > 128 {
+        return Err(EventError::BadRequest(anyhow::anyhow!(
+            "invitation token is invalid"
+        )));
+    }
+
+    Ok(token.to_owned())
 }
 
 fn invitation_insert_error(error: sqlx::Error) -> EventError {
@@ -933,6 +1136,7 @@ impl IntoResponse for EventError {
     fn into_response(self) -> Response {
         let (status, code, message) = match self {
             Self::BadRequest(error) => (StatusCode::BAD_REQUEST, "bad_request", error.to_string()),
+            Self::Forbidden(error) => (StatusCode::FORBIDDEN, "forbidden", error.to_string()),
             Self::NotFound => (
                 StatusCode::NOT_FOUND,
                 "event_not_found",
@@ -976,8 +1180,8 @@ impl IntoResponse for EventError {
 #[cfg(test)]
 mod tests {
     use super::{
-        cover_image_extension, escape_html, normalize_email, parse_required_datetime,
-        validate_pdf_content_type,
+        cover_image_extension, escape_html, normalize_email, normalize_share_token,
+        parse_required_datetime, validate_pdf_content_type,
     };
 
     #[test]
@@ -1014,5 +1218,14 @@ mod tests {
             escape_html("<Gather & friends>"),
             "&lt;Gather &amp; friends&gt;"
         );
+    }
+
+    #[test]
+    fn validates_share_tokens() {
+        assert_eq!(
+            normalize_share_token("  abc123  ").expect("token accepted"),
+            "abc123"
+        );
+        assert!(normalize_share_token("").is_err());
     }
 }
