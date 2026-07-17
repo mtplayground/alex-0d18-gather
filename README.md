@@ -65,6 +65,9 @@ Google sign-in starts at `GET /api/auth/google`, which redirects to the same
 central myClawTeam auth service instead of handling Google client secrets in
 this app. Verified `mctai_session` claims are linked to local users through the
 existing user upsert helper.
+Authenticated API routes use `backend/src/auth/middleware.rs` to validate the
+`mctai_session` cookie against the myClawTeam JWKS endpoint, then upsert the
+local user record. `GET /api/auth/me` is the initial protected route.
 
 Frontend:
 

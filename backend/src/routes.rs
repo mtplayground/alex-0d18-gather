@@ -12,10 +12,13 @@ struct HealthResponse {
 }
 
 pub fn app(state: AppState) -> Router {
+    let protected_auth_routes = crate::auth::routes::protected_router(state.clone());
+
     Router::new()
         .route("/", get(root))
         .route("/api/health", get(health))
         .nest("/api/auth", crate::auth::routes::router())
+        .nest("/api/auth", protected_auth_routes)
         .with_state(state)
         .layer(CorsLayer::new().allow_origin(Any))
 }
