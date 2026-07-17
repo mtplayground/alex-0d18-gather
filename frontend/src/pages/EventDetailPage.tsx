@@ -2,9 +2,12 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 
 import {
   createShareableInviteLink,
+  EventRsvpListResult,
   EventDetail,
+  fetchEventRsvps,
   fetchEventDetail,
   inviteFriendByEmail,
+  RsvpListEntry,
 } from "../lib/eventsApi";
 
 type LoadState = "loading" | "loaded" | "error";
@@ -12,6 +15,13 @@ type InviteActionState = "idle" | "sending" | "linking" | "success" | "error";
 
 type EventDetailPageProps = {
   eventId: string;
+};
+
+const emptyRsvpList: EventRsvpListResult = {
+  event_id: "",
+  coming: [],
+  declined: [],
+  maybe: [],
 };
 
 function EventDetailPage({ eventId }: EventDetailPageProps) {
@@ -241,26 +251,137 @@ function LoadedEventDetail({ detail }: { detail: EventDetail }) {
 
             <InviteFriendsPanel eventId={event.id} />
 
-            <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
-              <div className="flex items-center justify-between gap-4">
-                <h2 className="text-base font-semibold text-slate-950">RSVPs</h2>
-                <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
-                  Later task
-                </span>
-              </div>
-              <div className="mt-4 rounded-md border border-dashed border-slate-300 bg-slate-50 p-4">
-                <p className="text-sm font-semibold text-slate-900">
-                  RSVP list will appear here.
-                </p>
-                <p className="mt-1 text-sm leading-6 text-slate-600">
-                  Guest response tracking will connect to this section.
-                </p>
-              </div>
-            </section>
+            <RsvpListPanel eventId={event.id} />
           </aside>
         </div>
       </section>
     </main>
+  );
+}
+
+function RsvpListPanel({ eventId }: { eventId: string }) {
+  const [rsvps, setRsvps] = useState<EventRsvpListResult>(emptyRsvpList);
+  const [status, setStatus] = useState<LoadState>("loading");
+  const [message, setMessage] = useState("");
+  const totalResponses =
+    rsvps.coming.length + rsvps.maybe.length + rsvps.declined.length;
+
+  useEffect(() => {
+    let active = true;
+
+    async function loadRsvps() {
+      setStatus("loading");
+      setMessage("");
+
+      try {
+        const result = await fetchEventRsvps(eventId);
+        if (!active) {
+          return;
+        }
+        setRsvps(result);
+        setStatus("loaded");
+      } catch (error) {
+        if (!active) {
+          return;
+        }
+        setRsvps({ ...emptyRsvpList, event_id: eventId });
+        setStatus("error");
+        setMessage(
+          error instanceof Error ? error.message : "RSVP list could not be loaded.",
+        );
+      }
+    }
+
+    void loadRsvps();
+
+    return () => {
+      active = false;
+    };
+  }, [eventId]);
+
+  return (
+    <section className="rounded-lg border border-slate-200 bg-white p-5 shadow-sm">
+      <div className="flex items-center justify-between gap-4">
+        <h2 className="text-base font-semibold text-slate-950">RSVPs</h2>
+        <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-semibold text-slate-600">
+          {totalResponses} {totalResponses === 1 ? "reply" : "replies"}
+        </span>
+      </div>
+
+      {status === "loading" ? (
+        <p className="mt-4 text-sm leading-6 text-slate-600">Loading RSVP list.</p>
+      ) : null}
+
+      {status === "error" ? (
+        <p className="mt-4 text-sm leading-6 text-rose-700" role="alert">
+          {message}
+        </p>
+      ) : null}
+
+      {status === "loaded" && totalResponses === 0 ? (
+        <div className="mt-4 rounded-md border border-dashed border-slate-300 bg-slate-50 p-4">
+          <p className="text-sm font-semibold text-slate-900">No RSVP replies yet.</p>
+          <p className="mt-1 text-sm leading-6 text-slate-600">
+            Guest responses will appear here after they choose yes, maybe, or no.
+          </p>
+        </div>
+      ) : null}
+
+      {status === "loaded" && totalResponses > 0 ? (
+        <div className="mt-4 space-y-5">
+          <RsvpGroup entries={rsvps.coming} tone="emerald" title="Coming" />
+          <RsvpGroup entries={rsvps.maybe} tone="amber" title="Maybe" />
+          <RsvpGroup entries={rsvps.declined} tone="rose" title="Declined" />
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
+function RsvpGroup({
+  entries,
+  title,
+  tone,
+}: {
+  entries: RsvpListEntry[];
+  title: string;
+  tone: "emerald" | "amber" | "rose";
+}) {
+  const toneClass =
+    tone === "emerald"
+      ? "bg-emerald-100 text-emerald-800"
+      : tone === "amber"
+        ? "bg-amber-100 text-amber-800"
+        : "bg-rose-100 text-rose-800";
+
+  return (
+    <section>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold text-slate-950">{title}</h3>
+        <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${toneClass}`}>
+          {entries.length}
+        </span>
+      </div>
+      {entries.length ? (
+        <div className="mt-3 space-y-2">
+          {entries.map((entry) => (
+            <div
+              className="rounded-md border border-slate-200 bg-slate-50 p-3"
+              key={entry.invitation_id}
+            >
+              <p className="truncate text-sm font-semibold text-slate-950">
+                {rsvpEntryName(entry)}
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                {formatDateTime(entry.rsvp_responded_at)}
+              </p>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <p className="mt-2 text-sm leading-6 text-slate-600">No replies.</p>
+      )}
+    </section>
   );
 }
 
@@ -410,6 +531,10 @@ function formatDateTime(value: string): string {
 function fileNameFromKey(key: string): string {
   const segments = key.split("/").filter(Boolean);
   return segments[segments.length - 1] || key;
+}
+
+function rsvpEntryName(entry: RsvpListEntry): string {
+  return entry.invitee_email || entry.invitee_user_id || "Guest";
 }
 
 export default EventDetailPage;
